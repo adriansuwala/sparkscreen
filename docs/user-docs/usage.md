@@ -63,6 +63,12 @@ report.summary()  # "DENY: 1 deny, 0 unknown, 0 allow"
 
 for f in report.findings:
     print(f.verdict, f.reason, f.statement, f.targets, f.line)
+
+# What it *does*, independent of what the policy decided (see below)
+from sparkscreen import Effect
+report.effects                      # every effect in the file, unioned
+f.effect                            # frozenset[Effect] for one finding
+f.has_effect(Effect.DESTROY_DATA)   # True only if the flag is present
 ```
 
 Gating on `report.ok` is the intended use. It is strict: one unanalysable statement
@@ -85,20 +91,63 @@ Constant folding is scope-aware. If a name is shadowed by a loop variable, a fun
 parameter, or reassigned, the statement becomes `UNKNOWN` rather than a guess — reporting
 a confident but wrong SQL string would be worse than reporting nothing.
 
-### What it does not look at
+### The DataFrame API
 
-| | |
-|---|---|
-| `df.write.mode("overwrite").saveAsTable(...)` | DataFrame API — never becomes SQL text |
-| `df.write.save(...)`, `df.write.jdbc(...)` | same |
-| `dbutils.fs.rm(..., recurse=True)` | not analysed |
-| `os.system`, `shutil.rmtree` | not analysed |
+Writes through `df.write` are detected, even though they never become SQL text:
 
-**If your agent writes via the DataFrame API, this tool will not stop it.** Instruct the
-agent to use `spark.sql()`. Detection for the DataFrame API is the top item on the
-[roadmap](../roadmap.md); it has an oracle in development and is not shipped.
+```python
+df.write.mode("overwrite").saveAsTable("prod.t")   # DENY    destroys existing rows
+df.write.mode("overwrite").save("s3://bucket/x")   # DENY    + reaches outside the cluster
+df.write.jdbc(url, "prod.t", mode="overwrite")     # DENY    + reaches an external system
+df.write.mode("append").saveAsTable("staging.t")   # ALLOW   if staging is writable
+df.write.saveAsTable("prod.t")                     # REVIEW  Spark refuses if it exists
+df.write.mode(some_var).saveAsTable("prod.t")      # REVIEW  mode could be an overwrite
+```
+
+The save mode decides the effect, and the mode is read from the `.mode(...)` chain or,
+for `jdbc`, from the `mode=` keyword. An unreadable mode is the one case that degrades,
+and it degrades to REVIEW rather than to ALLOW.
+
+**An unknown table name does not hide an overwrite.** `saveAsTable(x)` for an
+unresolvable `x` still carries `WRITE_DATA | DESTROY_DATA` — the operation is knowable
+even when the destination is not. That is a stronger guarantee than the SQL path can
+offer, where an unresolvable `spark.sql(q)` genuinely is unknown.
+
+`dbutils.fs.rm`, `os.system` and `shutil.rmtree` are **not** analysed, by decision.
 
 ---
+
+## What an operation does
+
+`verdict` is a policy decision. `effect` is a fact about the operation, and the two are
+separate on purpose — the same `DROP TABLE` is `DENY` under one policy and `REVIEW`
+under another, but it destroys the table either way.
+
+| effect | |
+|---|---|
+| `WRITE_SCHEMA` | structure changed: columns, constraints, tables |
+| `WRITE_DATA` | rows added or changed |
+| `DESTROY_DATA` | rows or durable objects removed |
+| `READ_DATA` | rows read |
+| `READ_LOCAL_FS` | the driver's local filesystem is read |
+| `LOAD_CODE` | code that will be executed is loaded |
+| `REACHES_EXTERNAL` | a filesystem path, catalog, or opaque procedure |
+| `CHANGE_CONFIG` | session or runtime configuration changed |
+
+A statement carries several at once, which is the point:
+
+```sql
+ALTER TABLE t DROP COLUMN a   -- WRITE_SCHEMA | DESTROY_DATA
+ALTER TABLE t ADD COLUMN a INT DEFAULT 0   -- WRITE_SCHEMA   (additive)
+LOAD DATA LOCAL INPATH '/etc/passwd' ...  -- WRITE_DATA | READ_LOCAL_FS | REACHES_EXTERNAL
+```
+
+`DESTROY_DATA` on `DELETE`/`UPDATE`/`MERGE` is a deliberate slowdown flag, not a damage
+estimate: a `DELETE ... WHERE id = 3` still removes a record, so it is never certified
+harmless. Allow it per namespace if that suits your workflow.
+
+An **empty** effect set means either "analysed, nothing durable" (`use prod`) or "we
+could not analyse it". `report.analysis_failures` tells the two apart.
 
 ## Policies
 

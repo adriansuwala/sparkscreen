@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 
+from .analysis.calls import DataFrameWrite, find_dataframe_writes
 from .analysis.effects import effects_for_label
 from .analysis.folding import fold_sinks
 from .analysis.treewalk import (
@@ -85,6 +86,15 @@ def screen(
 
     # 3-4. find and fold SQL sinks
     folder = fold_sinks(tree)
+
+    # DataFrame writes are found from the same tree and the same folder, but they are a
+    # separate pass: they never become SQL text, so there is nothing to parse and no
+    # statement label to classify. Their effect comes from the method and the save mode
+    # instead. Run before the SQL early-return below, because a file can contain only
+    # DataFrame writes and must not be reported as having nothing in it.
+    for write in find_dataframe_writes(tree, folder):
+        report.add(_eval_write(policy, write))
+
     if not folder.resolved and not folder.unresolved:
         return report
 
@@ -149,6 +159,144 @@ def screen(
         ))
 
     return report
+
+
+def _ref(name: str):
+    """Build a NamespaceRef from a dotted name.
+
+    A DataFrame destination is a plain string, not a parse tree, so this reconstructs
+    the shape `treewalk.NamespaceRef` produces. Splitting on "." is right for the table
+    names the DataFrame API takes (`prod.users`); a path like `s3://bucket/x` is not a
+    namespace and is handled before it reaches here.
+    """
+    from .analysis.treewalk import NamespaceRef
+
+    return NamespaceRef(parts=tuple(p for p in name.split(".") if p))
+
+
+def _eval_write(policy: Policy, write: DataFrameWrite) -> Finding:
+    """Turn one DataFrame write into a Finding.
+
+    The shape deliberately mirrors the SQL path -- namespace allowlists first, then a
+    verdict, with the effect attached -- so a report reads the same way whichever kind of
+    write produced it. But the reasoning is not identical, and the differences are the
+    point:
+
+    * The effect is always populated. A DataFrame write does something knowable even
+      when its target is not, which is the opposite of `spark.sql(q)` with an
+      unresolvable `q`. An unknown *target* is not an analysis failure here.
+
+    * An unreadable save *mode* is a different failure. `df.write.mode(x)` where `x` is a
+      runtime value could be an overwrite, so we cannot say the write is safe, and it
+      reports UNKNOWN. This is the one case where the DataFrame path degrades, and it
+      degrades to UNKNOWN rather than to ALLOW.
+
+    * `denies_regardless_of_namespace` is the same predicate the effect axis applies to
+      SQL labels. Reusing it is what makes "overwrite is not waivable by namespace" a
+      property of the policy engine rather than of the SQL parser.
+    """
+    from .analysis.effects import denies_regardless_of_namespace
+
+    where = f"{write.chain}.{write.operation}"
+    targets = (write.target,) if write.target_known and write.target else ()
+
+    finding: Finding | None = None
+    # An unreadable destination defeats the allowlists, but only the allowlists -- the
+    # effect is already known, so this is a review trigger rather than a blind spot.
+    if not write.target_known:
+        finding = Finding(
+            verdict=Verdict.UNKNOWN,
+            reason=Reason.UNRESOLVED_DYNAMIC_SQL,
+            message=f"{where} writes to a destination we cannot resolve, so its "
+                    f"namespace was not checked; effect is still known",
+            severity=Severity.MEDIUM,
+            line=write.key.line,
+            statement=f"DataFrameWriter.{write.operation}",
+        )
+    elif denies_regardless_of_namespace(write.effects):
+        finding = Finding(
+            verdict=Verdict.DENY,
+            reason=Reason.DESTRUCTIVE_STATEMENT,
+            message=f"{where} replaces existing data"
+                    if write.overwrites
+                    else f"{where} is a data write",
+            severity=Severity.CRITICAL if write.overwrites else Severity.HIGH,
+            line=write.key.line,
+            statement=f"DataFrameWriter.{write.operation}",
+            targets=targets,
+        )
+    else:
+        # A plain append. Namespace still applies: writing prod is not the same as
+        # writing staging. The two checks mirror `Policy.evaluate_statement` -- an
+        # independent writable check and an independent readable check, not an
+        # either/or -- because the bug that made the readable one dead was exactly
+        # joining them (see D-notes in docs/findings.md, F8).
+        notes: list[str] = []
+        refs = [_ref(t) for t in targets]
+        # No writable list configured is not permission to write. With no allowlist we
+        # have no evidence the destination is in bounds, and the SQL path behaves the
+        # same way: a Policy with no rules produces UNSUPPORTED_STATEMENT -> UNKNOWN,
+        # never ALLOW. An append that lands here has been screened and cleared, which
+        # is exactly the "confident wrong answer" this tool exists to avoid -- a policy
+        # that forgets to set writable_namespaces would otherwise auto-approve every
+        # DataFrame append in the codebase.
+        if not policy.writable_namespaces:
+            notes.append(
+                "the policy sets no writable_namespaces, so the destination could "
+                "not be confirmed as in bounds"
+            )
+        else:
+            for r in refs:
+                if not any(r.matches(pat) for pat in policy.writable_namespaces):
+                    notes.append(
+                        f"{r.name} is outside the writable namespaces "
+                        f"{list(policy.writable_namespaces)}"
+                    )
+        if policy.readable_namespaces:
+            for r in refs:
+                if not any(r.matches(pat) for pat in policy.readable_namespaces):
+                    notes.append(
+                        f"{r.name} is outside the readable namespaces "
+                        f"{list(policy.readable_namespaces)}"
+                    )
+        if notes:
+            finding = Finding(
+                verdict=Verdict.UNKNOWN,
+                reason=Reason.OUTSIDE_ALLOWLIST,
+                message=f"{where} writes data outside the permitted namespaces: "
+                        + "; ".join(notes),
+                severity=Severity.MEDIUM,
+                line=write.key.line,
+                statement=f"DataFrameWriter.{write.operation}",
+                targets=targets,
+            )
+        else:
+            finding = Finding(
+                verdict=Verdict.ALLOW,
+                reason=Reason.WITHIN_ALLOWLIST,
+                message=f"{where} appends within the permitted namespaces",
+                severity=Severity.LOW,
+                line=write.key.line,
+                statement=f"DataFrameWriter.{write.operation}",
+                targets=targets,
+            )
+
+    # An unreadable mode is the one thing that can turn a benign append into an
+    # unexamined overwrite, so it is checked last and overrides a permissive verdict.
+    if not write.mode_known:
+        finding = Finding(
+            verdict=Verdict.UNKNOWN,
+            reason=Reason.UNRESOLVED_DYNAMIC_SQL,
+            message=f"{where} sets a save mode we cannot read; it may be an overwrite, "
+                    f"so it needs review",
+            severity=Severity.HIGH,
+            line=write.key.line,
+            statement=f"DataFrameWriter.{write.operation}",
+            targets=targets,
+        )
+
+    finding.effect = write.effects
+    return finding
 
 
 def _eval_one(

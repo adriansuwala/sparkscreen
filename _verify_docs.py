@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import sys
 
-from sparkscreen import Verdict, read_only_policy, screen
+from sparkscreen import Effect, Verdict, read_only_policy, screen
 from sparkscreen.model import Reason
-from sparkscreen.policy import Limits
+from sparkscreen.policy import Limits, Policy
 
 failures: list[str] = []
 
@@ -66,6 +66,45 @@ def main() -> int:
     for name in ("unresolved_dynamic_sql", "unparseable_sql", "unsupported_statement",
                  "resource_limit", "outside_allowlist"):
         check(f"Reason.{name}", getattr(Reason, name.upper()).value, name)
+
+    # --- the DataFrame table in usage.md, row by row ---
+    check("df overwrite saveAsTable -> DENY",
+          screen('df.write.mode("overwrite").saveAsTable("prod.t")').verdict,
+          Verdict.DENY)
+    check("df overwrite save -> DENY",
+          screen('df.write.mode("overwrite").save("s3://b/x")').verdict, Verdict.DENY)
+    check("df jdbc overwrite -> DENY",
+          screen('df.write.jdbc(url, "prod.t", mode="overwrite")').verdict,
+          Verdict.DENY)
+
+    staging = Policy(writable_namespaces=("staging.*",),
+                     readable_namespaces=("staging.*",))
+    check("df append to staging -> ALLOW",
+          screen('df.write.mode("append").saveAsTable("staging.t")', staging).verdict,
+          Verdict.ALLOW)
+    check("df bare saveAsTable prod -> REVIEW",
+          screen('df.write.saveAsTable("prod.t")').verdict, Verdict.UNKNOWN)
+    check("df unreadable mode -> REVIEW",
+          screen('df.write.mode(some_var).saveAsTable("prod.t")').verdict,
+          Verdict.UNKNOWN)
+
+    # "an unknown table name does not hide an overwrite"
+    unknown = screen('df.write.mode("overwrite").saveAsTable(some_name)')
+    check("unknown target still DESTROY_DATA",
+          Effect.DESTROY_DATA in unknown.effects, True)
+    check("unknown target is REVIEW", unknown.verdict, Verdict.UNKNOWN)
+
+    # --- the effect axis table in usage.md ---
+    def eff(sql: str):
+        return screen(f"spark.sql({sql!r})").findings[0].effect
+
+    check("DROP COLUMN effects",
+          sorted(str(e) for e in eff("alter table t drop column a")),
+          ["DESTROY_DATA", "WRITE_SCHEMA"])
+    check("ADD COLUMN effects",
+          sorted(str(e) for e in eff("alter table t add column a int default 0")),
+          ["WRITE_SCHEMA"])
+    check("USE prod has empty effect", eff("use prod"), frozenset())
 
     # --- analysis_failures is documented as separating "could not look" ---
     report = screen("spark.sql('select 1')\nspark.sql('SELCT 1')")
