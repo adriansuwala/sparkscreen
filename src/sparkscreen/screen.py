@@ -89,7 +89,11 @@ def screen(
 
     parser = get_parser(spec)
 
-    for line, sql in sorted(folder.resolved.items()):
+    # `resolved`/`unresolved` are keyed by a per-sink SinkKey, not by line: two sinks
+    # can share a line, and keying by line silently dropped one of them -- which is how
+    # `spark.sql("DROP TABLE prod.users"); spark.sql("select 1")` screened as ALLOW.
+    for key, sql in sorted(folder.resolved.items()):
+        line = key.line
         if len(sql) > policy.limits.max_sql_chars:
             report.add(Finding(
                 verdict=Verdict.DENY,
@@ -134,13 +138,13 @@ def screen(
         # EXECUTE IMMEDIATE hides real statements from the top level.
         _check_execute_immediate(report, policy, parser, parsed.tree, sql, line)
 
-    for line, failure in sorted(folder.unresolved.items()):
+    for key, failure in sorted(folder.unresolved.items()):
         report.add(Finding(
             verdict=Verdict.UNKNOWN,
             reason=Reason.UNRESOLVED_DYNAMIC_SQL,
             message=f"{failure}; SQL not analyzed, needs human review",
             severity=Severity.HIGH,
-            line=line,
+            line=key.line,
         ))
 
     return report

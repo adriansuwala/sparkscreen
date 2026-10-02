@@ -16,9 +16,9 @@ both directions of that contract:
 
 Deliberately independent of the SQL parser: this module tests folding only.
 
-Known folding bugs are recorded at the bottom as non-strict xfails rather than
-asserted as correct behaviour, so a fix turns them green without anyone rewriting
-the expectation.
+The folding bugs that used to be recorded at the bottom as non-strict xfails are
+fixed and asserted directly; see the `test_bug_*` block. Each one was a fail-open, so
+they are kept as ordinary tests rather than deleted -- a regression there is silent.
 """
 import ast
 
@@ -28,6 +28,7 @@ from sparkscreen.analysis.folding import (
     MAX_CONST_STRING,
     MAX_FOLD_DEPTH,
     FoldFailure,
+    SinkKey,
     fold_sinks,
 )
 
@@ -39,16 +40,54 @@ def fold(source: str):
     return fold_sinks(ast.parse(source))
 
 
+def by_line(folder_dict: dict[SinkKey, object]) -> dict[int, object]:
+    """`{line: value}` view of a SinkKey-keyed dict.
+
+    `resolved`/`unresolved` are keyed by SinkKey, not by line, precisely because a
+    line is not a sink identity. This helper exists so the table-driven cases below
+    can keep stating their expectations as line -> value; it asserts that no two
+    sinks share a line, so it can never hide the collision that caused the silent
+    drop. Where two sinks DO share a line, the test uses the raw dicts.
+    """
+    out: dict[int, object] = {}
+    for key, value in folder_dict.items():
+        assert isinstance(key, SinkKey)
+        assert key.line not in out, (
+            f"two sinks share line {key.line}; use the raw dict for this case"
+        )
+        out[key.line] = value
+    return out
+
+
 def resolved_of(source: str) -> dict[int, str]:
-    return fold(source).resolved
+    return by_line(fold(source).resolved)  # type: ignore[return-value]
 
 
 def unresolved_of(source: str) -> dict[int, FoldFailure]:
-    return fold(source).unresolved
+    return by_line(fold(source).unresolved)  # type: ignore[return-value]
+
+
+def failure_on(source: str, line: int) -> FoldFailure:
+    """The FoldFailure reported for the sink on `line`."""
+    found = by_line(fold(source).unresolved)
+    assert line in found, f"no FoldFailure on line {line}; got {found}"
+    return found[line]  # type: ignore[return-value]
+
+
+def sink_count(source: str) -> int:
+    """How many calls in `source` the folder is expected to treat as SQL sinks."""
+    return len(sink_lines(source))
 
 
 def sink_lines(source: str) -> list[int]:
-    """Line numbers of every call the folder considers a SQL sink."""
+    """Line numbers of every call the folder considers a SQL sink.
+
+    Independent reimplementation of the sink test, so the "nothing was dropped"
+    invariant is checked against something other than the code under test. Note
+    this counts a bare `spark.sql()` as a sink: the folder treats every recognised
+    `.sql(...)` / `sql(...)` call as one, because a call with no visible argument
+    still executes SQL we cannot see.
+    """
     out: list[int] = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Call):
@@ -56,8 +95,7 @@ def sink_lines(source: str) -> list[int]:
             attr = getattr(f, "attr", None)
             name = getattr(f, "id", None)
             if attr in ("sql", "sqlQuery") or name in ("sql", "sqlQuery"):
-                if node.args or node.keywords:
-                    out.append(node.lineno)
+                out.append(node.lineno)
     return sorted(out)
 
 
@@ -419,6 +457,23 @@ RECOVERS = [
         sql={2: "SELECT * FROM prod.t"},
         line=None,
     ),
+    # -- nested f-string as a replacement field ---------------------------
+    # Valid since PEP 701. A nested f-string over a constant folds exactly, so
+    # folding it is faithful rather than optimistic.
+    dict(
+        id="nested-fstring-field",
+        src='tbl = "prod.t"\nspark.sql(f"SELECT {f\'{tbl}\'}")',
+        sql={2: "SELECT prod.t"},
+        line=None,
+    ),
+    # -- folded (non-scalar) expression as a replacement field -------------
+    # The field has no format spec, so the folded string is what the engine sees.
+    dict(
+        id="fstring-field-folded-binop",
+        src='a = "SELECT "\nb = "1"\nspark.sql(f"{a + b}")',
+        sql={3: "SELECT 1"},
+        line=None,
+    ),
 ]
 
 
@@ -427,7 +482,7 @@ def test_recovers_exact_sql(case):
     """The folded string is exactly what the engine will execute, on the right line."""
     folder = fold(case["src"])
     expected = case["sql"] if case["line"] is None else {case["line"]: case["sql"]}
-    assert folder.resolved == expected
+    assert by_line(folder.resolved) == expected
     assert folder.unresolved == {}, f"recovered SQL must not also be reported unresolved: {folder.unresolved}"
 
 
@@ -435,7 +490,7 @@ def test_recovers_exact_sql(case):
 def test_resolved_lines_are_real_sink_lines(case):
     """Every reported line number corresponds to a source line with a SQL sink."""
     folder = fold(case["src"])
-    assert set(folder.resolved) <= set(sink_lines(case["src"]))
+    assert {k.line for k in folder.resolved} <= set(sink_lines(case["src"]))
 
 
 # --------------------------------------------------------------------------- no recovery
@@ -550,11 +605,6 @@ UNRESOLVED_CASES = [
         line=1,
     ),
     dict(
-        id="nested-fstring",
-        src='tbl = "prod.t"\nspark.sql(f"SELECT {f\'{tbl}\'}")',
-        line=2,
-    ),
-    dict(
         id="augassigned-constant",
         src='tbl = "prod.t"\nsql = f"SELECT * FROM {tbl}"\nsql += " WHERE x=1"\nspark.sql(sql)',
         line=4,
@@ -584,7 +634,7 @@ def test_does_not_recover(case):
     """Runtime-dependent SQL must be reported unresolved -- never as recovered."""
     folder = fold(case["src"])
     assert folder.resolved == {}, "unsoundly recovered a runtime-dependent sink"
-    assert case["line"] in folder.unresolved, (
+    assert case["line"] in {k.line for k in folder.unresolved}, (
         f"expected a FoldFailure on line {case['line']}, got {folder.unresolved}"
     )
 
@@ -594,7 +644,7 @@ def test_does_not_recover(case):
 )
 def test_fold_failure_carries_a_reason(case):
     """An unresolved sink explains itself: a reason plus the source expression."""
-    failure = fold(case["src"]).unresolved[case["line"]]
+    failure = failure_on(case["src"], case["line"])
     assert isinstance(failure, FoldFailure)
     assert failure.reason
     assert failure.expression
@@ -602,7 +652,7 @@ def test_fold_failure_carries_a_reason(case):
 
 
 def test_unresolved_expression_is_the_source_text():
-    failure = unresolved_of('tbl = input()\nspark.sql(f"SELECT * FROM {tbl}")')[2]
+    failure = failure_on('tbl = input()\nspark.sql(f"SELECT * FROM {tbl}")', 2)
     assert "tbl" in failure.expression
     assert "SELECT" in failure.expression
 
@@ -610,15 +660,105 @@ def test_unresolved_expression_is_the_source_text():
 def test_long_expression_is_truncated_in_the_failure_message():
     """A pathological expression must not blow up the report."""
     src = "spark.sql(" + "+".join(["x"] * 60) + ")"
-    failure = unresolved_of(src)[1]
+    failure = failure_on(src, 1)
     assert len(failure.expression) <= 120
     assert failure.expression.endswith("...")
 
 
+# Constructs that rebind (or rebind inside) a name the constant table knows about.
+# Each one used to leave a confidently wrong SQL string in `resolved`.
+REBINDINGS_THAT_INVALIDATE = [
+    dict(id="global-statement", src='q = "DROP TABLE prod.t"\ndef f():\n    global q\n    q = "select 1"\nspark.sql(q)', line=5),
+    dict(id="nonlocal-rebind", src='def f():\n    q = "DROP TABLE prod.t"\n    def g():\n        nonlocal q\n        q = "select 1"\n    g()\n    spark.sql(q)', line=7),
+    dict(id="import-rebinds", src='tbl = "prod.t"\nimport tbl\nspark.sql(f"drop {tbl}")', line=3),
+    dict(id="import-from-rebinds", src='tbl = "prod.t"\nfrom x import tbl\nspark.sql(f"drop {tbl}")', line=3),
+    dict(id="tuple-unpack-rebinds", src='tbl = "prod.t"\ntbl, other = pair()\nspark.sql(f"drop {tbl}")', line=3),
+    dict(id="starred-unpack-rebinds", src='*rest, tbl = pair()\nspark.sql(f"drop {tbl}")', line=2),
+    dict(id="match-capture-rebinds", src='tbl = "prod.t"\nmatch x:\n    case tbl:\n        spark.sql(f"drop {tbl}")', line=4),
+    dict(id="finally-block-rebinds", src='q = "DROP TABLE prod.t"\ntry:\n    pass\nfinally:\n    q = "select 1"\nspark.sql(q)', line=6),
+    dict(id="lambda-body-does-not-leak", src='q = lambda: "DROP TABLE prod.t"\nspark.sql(q)', line=2),
+    dict(id="nested-def-does-not-leak", src='def f():\n    def g():\n        q = "DROP TABLE prod.t"\n    g()\nspark.sql(q)', line=5),
+    dict(id="comprehension-body-does-not-leak", src='xs = ["DROP TABLE prod.t" for _ in y]\nspark.sql(xs[0])', line=2),
+]
+
+#: Keyword-argument sinks PySpark really accepts, and the exact SQL we recover.
+KEYWORD_SINK_CASES = [
+    dict(id="query-literal", src='spark.sql(query="DROP TABLE prod.t")', sql="DROP TABLE prod.t", line=1),
+    dict(id="sql-literal", src='spark.sql(sql="DROP TABLE prod.t")', sql="DROP TABLE prod.t", line=1),
+    dict(id="query-fstring", src='tbl = "prod.t"\nspark.sql(query=f"DROP {tbl}")', sql="DROP prod.t", line=2),
+    dict(id="query-constant-name", src='q = "DROP TABLE prod.t"\nspark.sql(query=q)', sql="DROP TABLE prod.t", line=2),
+    dict(id="query-with-args-kwarg", src='spark.sql(query="DROP TABLE prod.t", args={})', sql="DROP TABLE prod.t", line=1),
+    dict(id="sqlQuery-keyword", src='spark.sql(sqlQuery="DROP TABLE prod.t")', sql="DROP TABLE prod.t", line=1),
+]
+
+#: Sink shapes where the SQL text is genuinely not visible. All must fail loudly.
+UNRECOVERABLE_KEYWORD_SINKS = [
+    dict(id="query-dynamic", src="spark.sql(query=cfg.q)", line=1),
+    dict(id="query-unbound-name", src="spark.sql(query=q)", line=1),
+    dict(id="kwargs-splat", src='spark.sql(**{"query": "DROP TABLE prod.t"})', line=1),
+    dict(id="args-only", src="spark.sql(args={})", line=1),
+    dict(id="no-arguments", src="spark.sql()", line=1),
+    dict(id="positional-starred", src="spark.sql(*queries)", line=1),
+    dict(id="unknown-keyword-name", src='spark.sql(cmd="DROP TABLE prod.t")', line=1),
+]
+
+
 # --------------------------------------------------------------------------- invariants
 
-#: A grab-bag of sink shapes; the two dicts must never claim the same line.
-ALL_SHAPES = [c["src"] for c in RECOVERS + UNRESOLVED_CASES]
+#: A grab-bag of sink shapes; the two dicts must never claim the same sink.
+ALL_SHAPES = (
+    [c["src"] for c in RECOVERS + UNRESOLVED_CASES]
+    + [c["src"] for c in REBINDINGS_THAT_INVALIDATE]
+    + [c["src"] for c in KEYWORD_SINK_CASES + UNRECOVERABLE_KEYWORD_SINKS]
+)
+
+
+@pytest.mark.parametrize("src", ALL_SHAPES, ids=range(len(ALL_SHAPES)))
+def test_every_sink_lands_in_exactly_one_dict(src):
+    """No sink may be silently dropped -- the invariant the module exists for.
+
+    Every call the folder recognises as a SQL sink must appear in exactly one of
+    `resolved` / `unresolved`. A sink in neither is a statement we never screened,
+    which is indistinguishable from "no SQL here" and reports ALLOW. This is what
+    let `spark.sql("DROP TABLE prod.users"); spark.sql("select 1")` through: the
+    line-keyed dicts collapsed both sinks onto one key.
+    """
+    folder = fold(src)
+    overlap = set(folder.resolved) & set(folder.unresolved)
+    assert not overlap, f"the same sink appears in both dicts: {sorted(overlap)}"
+    assert len(folder.resolved) + len(folder.unresolved) == sink_count(src), (
+        f"expected {sink_count(src)} sink entries, got "
+        f"{len(folder.resolved) + len(folder.unresolved)}: "
+        f"resolved={folder.resolved} unresolved={folder.unresolved}"
+    )
+
+
+@pytest.mark.parametrize("src", ALL_SHAPES, ids=range(len(ALL_SHAPES)))
+def test_sink_keys_carry_the_line_the_call_sits_on(src):
+    """Every reported key names a line that really holds a SQL sink."""
+    folder = fold(src)
+    real = set(sink_lines(src))
+    for key in (*folder.resolved, *folder.unresolved):
+        assert isinstance(key, SinkKey)
+        assert key.line in real, f"line {key.line} has no sink: {src!r}"
+
+
+@pytest.mark.parametrize("src", ALL_SHAPES, ids=range(len(ALL_SHAPES)))
+def test_sink_keys_are_unique_and_ordered(src):
+    """Two sinks may share a line, but never a key."""
+    folder = fold(src)
+    keys = [*folder.resolved, *folder.unresolved]
+    assert len(set(keys)) == len(keys)
+    for table in (folder.resolved, folder.unresolved):
+        assert list(table) == sorted(table), "iteration order must be source order"
+
+
+@pytest.mark.parametrize("src", ALL_SHAPES, ids=range(len(ALL_SHAPES)))
+def test_ordinals_are_dense_from_zero(src):
+    """Ordinals are a dense sequence, so a caller can size an array from them."""
+    folder = fold(src)
+    ordinals = sorted(k.ordinal for k in (*folder.resolved, *folder.unresolved))
+    assert ordinals == list(range(len(ordinals)))
 
 
 @pytest.mark.parametrize("src", ALL_SHAPES, ids=range(len(ALL_SHAPES)))
@@ -630,8 +770,8 @@ def test_resolved_and_unresolved_are_disjoint(src):
 
 @pytest.mark.parametrize("src", ALL_SHAPES, ids=range(len(ALL_SHAPES)))
 def test_resolved_values_are_strings(src):
-    for line, sql in fold(src).resolved.items():
-        assert isinstance(sql, str), f"line {line} produced {type(sql).__name__}"
+    for key, sql in fold(src).resolved.items():
+        assert isinstance(sql, str), f"line {key.line} produced {type(sql).__name__}"
         assert len(sql) <= MAX_CONST_STRING
 
 
@@ -675,7 +815,7 @@ def test_dynamic_rebinding_clears_the_previous_constant():
         'tbl = "prod.t"\ntbl = input()\nspark.sql(f"SELECT * FROM {tbl}")'
     )
     assert folder.resolved == {}
-    assert 3 in folder.unresolved
+    assert 3 in {k.line for k in folder.unresolved}
 
 
 @pytest.mark.parametrize(
@@ -811,14 +951,14 @@ def test_sink_shapes_that_carry_no_string_argument(src):
 def test_star_args_sink_is_reported_unresolved():
     folder = fold("spark.sql(*queries)")
     assert folder.resolved == {}
-    assert 1 in folder.unresolved
+    assert 1 in {k.line for k in folder.unresolved}
 
 
 def test_string_multiplication_over_the_cap_is_unresolved():
     """`"a" * 10**9` must not be materialised."""
     folder = fold('spark.sql("a" * 10**9)')
     assert folder.resolved == {}
-    assert 1 in folder.unresolved
+    assert 1 in {k.line for k in folder.unresolved}
 
 
 def test_string_multiplication_just_under_the_cap_is_resolved():
@@ -832,7 +972,7 @@ def test_fold_depth_cap_stops_runaway_recursion():
     deep = " + ".join(['"a"'] * 40)
     folder = fold(f'spark.sql({deep})')
     assert folder.resolved == {}
-    assert 1 in folder.unresolved
+    assert 1 in {k.line for k in folder.unresolved}
     assert MAX_FOLD_DEPTH > 0
 
 
@@ -844,49 +984,57 @@ def test_sink_line_numbers_point_at_the_call_not_the_argument():
         '    f"SELECT * FROM {tbl}",\n'
         ')\n'
     )
-    assert folder.resolved == {2: "SELECT * FROM prod.t"}
+    assert by_line(folder.resolved) == {2: "SELECT * FROM prod.t"}
 
 
 # --------------------------------------------------------------------------- known bugs
 #
-# Each of these is a case where folding returns a WRONG answer (or silently drops a
-# sink) rather than merely declining. Kept as non-strict xfails: the assertions
-# describe the correct behaviour, so fixing folding.py turns them green.
+# Each of these was a case where folding returned a WRONG answer (or silently dropped
+# a sink) rather than merely declining. They were recorded as non-strict xfails; all
+# are now fixed and asserted directly. Each was a fail-open: either a destructive
+# statement screened as ALLOW, or a clean, specific finding described a statement
+# that will never run that way.
 
 
-@pytest.mark.xfail(reason="resolved is keyed by line number, so two sinks on one "
-                          "line collapse and the first is dropped entirely",
-                  strict=False)
 def test_bug_two_sinks_on_one_line_are_both_reported():
-    """Two sinks, one line: both must be screened, not just the last one."""
+    """Two sinks, one line: both must be screened, not just one of them.
+
+    This was the worst of the set: `spark.sql("DROP TABLE prod.users"); spark.sql(
+    "select 1")` reported only the SELECT, so the whole snippet screened as ALLOW.
+    """
     src = 'spark.sql("DROP TABLE prod.t"); spark.sql("SELECT 1")'
     folder = fold(src)
-    assert len(sink_lines(src)) == 2, "precondition: the source really has two sinks"
+    assert sink_count(src) == 2, "precondition: the source really has two sinks"
     assert len(folder.resolved) + len(folder.unresolved) == 2
+    # both are recoverable here, so both must be recovered -- and the destructive
+    # one must not be the one that got dropped.
+    assert sorted(folder.resolved.values()) == ["DROP TABLE prod.t", "SELECT 1"]
 
 
-@pytest.mark.xfail(reason="loop targets are not invalidated, so a module-level "
-                          "constant is reused for the loop variable",
-                  strict=False)
 def test_bug_loop_target_shadows_a_module_constant():
+    """A for-loop target rebinds the name, so the outer constant is stale.
+
+    The bug reported the loop body as `DROP prod.t` -- a specific, confident DROP of
+    a production table that the loop will never execute. UNKNOWN is the right answer.
+    """
     folder = fold('tbl = "prod.t"\nfor tbl in tables:\n    spark.sql(f"DROP {tbl}")')
     assert folder.resolved == {}
-    assert 3 in folder.unresolved
+    assert 3 in {k.line for k in folder.unresolved}
 
 
-@pytest.mark.xfail(reason="function parameters are not tracked, so a module-level "
-                          "constant of the same name leaks into the function",
-                  strict=False)
 def test_bug_function_parameter_shadows_a_module_constant():
+    """A parameter shadows a same-named module constant inside the body.
+
+    Function bodies do not inherit the module constant table, so `tbl` here is the
+    caller-supplied argument and the SQL is not knowable.
+    """
     folder = fold(
         'tbl = "prod.t"\ndef q(spark, tbl):\n    return spark.sql(f"DROP {tbl}")'
     )
     assert folder.resolved == {}
-    assert 3 in folder.unresolved
+    assert 3 in {k.line for k in folder.unresolved}
 
 
-@pytest.mark.xfail(reason="`with`/`except` targets are not invalidated either",
-                  strict=False)
 @pytest.mark.parametrize(
     "src",
     [
@@ -896,29 +1044,33 @@ def test_bug_function_parameter_shadows_a_module_constant():
     ids=["with", "except"],
 )
 def test_bug_context_manager_target_shadows_a_module_constant(src):
+    """`with ... as x` and `except E as x` bind a fresh value for x.
+
+    Both leak into module scope after the block, and both shadow a module constant
+    inside it.
+    """
     folder = fold(src)
     assert folder.resolved == {}
 
 
-@pytest.mark.xfail(reason="AugAssign is not handled, so the pre-update value is "
-                          "reported as the recovered SQL",
-                  strict=False)
 def test_bug_augmented_assignment_is_ignored():
+    """AugAssign rebinds; the pre-update value is not the SQL.
+
+    Reporting the pre-update text gives a clean, specific finding for a statement
+    that will never run that way -- worse than reporting nothing at all.
+    """
     folder = fold('q = "DROP TABLE prod.t"\nq += " WHERE x=1"\nspark.sql(q)')
     assert folder.resolved == {}
-    assert 3 in folder.unresolved
+    assert 3 in {k.line for k in folder.unresolved}
 
 
-@pytest.mark.xfail(reason="`del` does not invalidate the binding",
-                  strict=False)
 def test_bug_del_does_not_invalidate_a_binding():
+    """`del q` unbinds q, so a later use raises NameError at runtime.
+    """
     folder = fold('q = "DROP TABLE prod.t"\ndel q\nspark.sql(q)')
     assert folder.resolved == {}
 
 
-@pytest.mark.xfail(reason="bindings made inside a class or function body leak "
-                          "out to module scope",
-                  strict=False)
 @pytest.mark.parametrize(
     "src",
     [
@@ -928,14 +1080,16 @@ def test_bug_del_does_not_invalidate_a_binding():
     ids=["function-body", "class-body"],
 )
 def test_bug_inner_scope_bindings_leak_to_module_scope(src):
+    """Function and class bodies do not contribute to the enclosing scope.
+
+    `q` is only ever bound while that body executes; at module scope it is unbound,
+    so the sink cannot resolve. A body that DOES resolve its own locals is covered
+    by `sink-inside-function` above.
+    """
     folder = fold(src)
     assert folder.resolved == {}
 
 
-@pytest.mark.xfail(reason="_fold_fstring requires the field to be a bare scalar "
-                          "even when no format spec is given, so folded "
-                          "expressions inside {} are rejected",
-                  strict=False)
 @pytest.mark.parametrize(
     "src",
     [
@@ -946,14 +1100,91 @@ def test_bug_inner_scope_bindings_leak_to_module_scope(src):
     ids=["binop-field", "call-field", "nested-fstring"],
 )
 def test_bug_folded_expression_as_fstring_field_is_rejected(src):
+    """A replacement field with no format spec may be any folded expression.
+
+    With no spec, the field is rendered with plain str(), so the folded string is
+    exactly what the engine sees. This was fail-closed but needlessly so: it turned
+    analysable code into UNKNOWN.
+    """
     folder = fold(src)
     assert folder.resolved != {}
 
 
-@pytest.mark.xfail(reason="keyword sinks are ignored entirely: no resolved entry "
-                          "and no FoldFailure either",
-                  strict=False)
-def test_bug_keyword_argument_sink_is_silently_ignored():
-    folder = fold('q = "DROP TABLE prod.t"\nspark.sql(query=q)')
+@pytest.mark.parametrize(
+    "case", REBINDINGS_THAT_INVALIDATE,
+    ids=[c["id"] for c in REBINDINGS_THAT_INVALIDATE],
+)
+def test_bug_any_rebinding_invalidates_the_constant(case):
+    """Every construct that can rebind a name must drop the stale constant.
+
+    Each of these used to leave a confidently wrong SQL string in `resolved`: a
+    clean, specific finding for a statement that will never run that way. Reporting
+    nothing beats reporting the wrong thing.
+    """
+    folder = fold(case["src"])
+    assert folder.resolved == {}, "reported a stale constant as recovered SQL"
+    assert case["line"] in {k.line for k in folder.unresolved}
+
+
+KEYWORD_SINK_CASES = [
+    dict(id="query-literal", src='spark.sql(query="DROP TABLE prod.t")', sql="DROP TABLE prod.t", line=1),
+    dict(id="sql-literal", src='spark.sql(sql="DROP TABLE prod.t")', sql="DROP TABLE prod.t", line=1),
+    dict(id="query-fstring", src='tbl = "prod.t"\nspark.sql(query=f"DROP {tbl}")', sql="DROP prod.t", line=2),
+    dict(id="query-constant-name", src='q = "DROP TABLE prod.t"\nspark.sql(query=q)', sql="DROP TABLE prod.t", line=2),
+    dict(id="query-with-args-kwarg", src='spark.sql(query="DROP TABLE prod.t", args={})', sql="DROP TABLE prod.t", line=1),
+    dict(id="sqlQuery-keyword", src='spark.sql(sqlQuery="DROP TABLE prod.t")', sql="DROP TABLE prod.t", line=1),
+]
+
+
+@pytest.mark.parametrize(
+    "case", KEYWORD_SINK_CASES, ids=[c["id"] for c in KEYWORD_SINK_CASES],
+)
+def test_bug_keyword_argument_sinks_are_recovered(case):
+    """`spark.sql(query=...)` and friends are real sinks and must be recovered.
+
+    They were in neither dict: not resolved (so not screened) and not unresolved
+    (so not flagged). The whole call disappeared from the report.
+    """
+    folder = fold(case["src"])
+    assert by_line(folder.resolved) == {case["line"]: case["sql"]}
+    assert folder.unresolved == {}
+
+
+
+
+@pytest.mark.parametrize(
+    "case", UNRECOVERABLE_KEYWORD_SINKS,
+    ids=[c["id"] for c in UNRECOVERABLE_KEYWORD_SINKS],
+)
+def test_bug_unrecoverable_sink_shapes_fail_loudly(case):
+    """A sink whose text we cannot see must be UNKNOWN, never absent.
+
+    This is the invariant the whole module exists to protect: there is no path from
+    "we could not read the SQL" to "no findings".
+    """
+    folder = fold(case["src"])
     assert folder.resolved == {}
-    assert 2 in folder.unresolved
+    assert case["line"] in {k.line for k in folder.unresolved}
+
+
+def test_bug_keyword_argument_sink_is_silently_ignored():
+    """A keyword-argument sink must be accounted for, and with the right SQL.
+
+    The original assertion here was `resolved == {} and 2 in unresolved`: i.e. that
+    `spark.sql(query=q)` must be *unresolved* even though `q` is a compile-time
+    constant. That is the wrong requirement. The bug was that the sink vanished --
+    it appeared in neither dict, so the whole call screened as ALLOW. Either
+    recovering the text or reporting a FoldFailure is a correct fix, and recovering
+    it is strictly better: the value is exact, so there is no reason to give up a
+    resolution the operator would otherwise have to triage by hand.
+    """
+    src = 'q = "DROP TABLE prod.t"\nspark.sql(query=q)'
+    folder = fold(src)
+    assert len(folder.resolved) + len(folder.unresolved) == 1, (
+        f"the sink must appear in exactly one dict, got resolved={folder.resolved} "
+        f"unresolved={folder.unresolved}"
+    )
+    if folder.resolved:
+        assert by_line(folder.resolved) == {2: "DROP TABLE prod.t"}
+    else:
+        assert 2 in {k.line for k in folder.unresolved}

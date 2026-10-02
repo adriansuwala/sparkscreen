@@ -96,6 +96,16 @@ MUST_NOT_ALLOW = [
     "spark.sql('SELCT 1')",
     "for t in tables:\n    spark.sql(f'truncate table {t}')",
     "spark.sql(query)",
+    # two sinks on one line: the destructive one was dropped entirely, ALLOW
+    'spark.sql("DROP TABLE prod.users"); spark.sql("select 1")',
+    # keyword-argument sinks were ignored by the folder and vanished
+    'spark.sql(query="DROP TABLE prod.users")',
+    'spark.sql("DROP TABLE prod.users", args={})',
+    'spark.sql(sql="select 1"); spark.sql(query="DROP TABLE prod.users")',
+    # a rebound name was folded to the pre-rebind value: a specific, wrong finding
+    "t = 'safe_table'\nfor t in ['a', 'b']:\n    spark.sql(f'drop table {t}')",
+    "tbl = 'safe'\ndef f(tbl):\n    return spark.sql(f'drop table {tbl}')",
+    "q = 'DROP TABLE prod.users'\nq += ' WHERE x=1'\nspark.sql(q)",
     # genuine Python syntax error -- must be ANALYSIS_ERROR, not a silent allow
     "def broken(:\n    pass",
     "spark.sql('select 1' +",

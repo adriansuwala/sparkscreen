@@ -1234,13 +1234,27 @@ class TestFoldingIntegration:
         )
         assert screen(source).verdict is Verdict.UNKNOWN
 
-    def test_folding_result_is_keyed_by_line(self):
+    def test_folding_result_is_keyed_per_sink_not_per_line(self):
+        """Each sink gets its own entry, keyed by a SinkKey carrying its line.
+
+        Regression test for the two-sinks-on-one-line drop. The old contract keyed
+        both dicts by line number, so `spark.sql("DROP TABLE prod.users");
+        spark.sql("select 1")` collapsed to a single entry and the DROP vanished.
+        """
         import ast
         from sparkscreen.analysis.folding import fold_sinks
         tree = ast.parse("spark.sql('select 1')\nspark.sql(join_sep)\n")
         folder = fold_sinks(tree)
-        assert folder.resolved[1] == "select 1"
-        assert 2 in folder.unresolved
+        assert {k.line: sql for k, sql in folder.resolved.items()} == {1: "select 1"}
+        assert [k.line for k in folder.unresolved] == [2]
+
+    def test_two_sinks_on_one_line_are_both_screened(self):
+        """A line is not a sink identity: both sinks must reach the report."""
+        source = 'spark.sql("DROP TABLE prod.users"); spark.sql("select 1")'
+        report = screen(source)
+        assert report.verdict is Verdict.DENY
+        dropped = [f for f in report.findings if "DROP TABLE prod.users" in (f.sql or "")]
+        assert dropped, f"the DROP was never reported: {report.to_dict()['findings']}"
 
     def test_unresolved_finding_names_the_offending_expression(self, spec_key):
         source = "spark.sql('select * from ' + tbl)\n"
