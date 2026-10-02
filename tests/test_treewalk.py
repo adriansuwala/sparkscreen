@@ -18,9 +18,15 @@ What these tests pin:
   * extraction never raises on anything the parser accepted, and the
     `grammar_key` argument tracks the grammar the tree actually came from
 
-The `xfail` markers are real, diagnosed defects -- see the comments on each for
-the root cause and the fix. They are `strict=False` where the behaviour is
+The one remaining `xfail` is a real, diagnosed defect -- see the comment on it for
+the root cause and the fix. It is `strict=False` where the behaviour is
 known-wrong-but-nuanced, so an XPASS is reported rather than hidden.
+
+The bugs these tests originally xfailed have been fixed, and the markers removed:
+`extract_namespaces` no longer over-collects (column aliases, CTE names,
+column-definition names, table providers, UPDATE/MERGE assignment targets), and
+`executed_immediate_sql` now recurses past the root's direct children. The
+comments marking each fix are kept so the reasoning survives.
 """
 from __future__ import annotations
 
@@ -391,15 +397,24 @@ def test_three_way_join_yields_all_three_tables(spec_key):
     ("select * from prod.t", ["prod.t"]),
     ("truncate table prod.t", ["prod.t"]),
     ("delete from prod.t where id = 1", ["prod.t"]),
-    ("update prod.t set a = 1", ["prod.t"]),
     ("insert overwrite table prod.t select 1", ["prod.t"]),
     ("load data local inpath '/etc/passwd' into table prod.users", ["prod.users"]),
     ("alter table prod.t set tblproperties ('a'='b')", ["prod.t"]),
     ("select * from (select * from a.b) x", ["a.b"]),
     ("select * from t where a in (select b from u)", ["t", "u"]),
-    # `update ... set a = 1` also reports `a` today: the assignment target is a
-    # bare ErrorCapturingIdentifier under AssignmentContext. Asserted here so the
-    # over-collection is visible; the correction is xfailed in the BUG 2 block.
+    # `update ... set a = 1` used to report the assignment target `a` as well
+    # (a bare ErrorCapturingIdentifier under AssignmentContext). That was BUG 2;
+    # with it fixed the row belongs here, asserting the *whole* result rather
+    # than just the absence of the noise.
+    ("update prod.t set a = 1", ["prod.t"]),
+    ("update prod.t set a = 1, b = 2 where c = 3", ["prod.t"]),
+    # A CTE name in FROM is a table reference, not an alias -- the complement of
+    # the BUG 2 fix. See test_cte_reference_in_from_is_still_a_table.
+    ("with q as (select * from prod.t) select * from q", ["prod.t", "q"]),
+    # CREATE TABLE LIKE: the source table is a `tableIdentifier` on 3.5.1 and an
+    # `identifierReference` on 4.0. Both must be found -- a missed source here is
+    # exactly the fail-open direction.
+    ("create table t2 like prod.t", ["prod.t", "t2"]),
 ])
 def test_namespace_extraction_basics(sql, expected, spec_key):
     assert sorted(names(sql, spec_key)) == sorted(expected)
@@ -446,33 +461,29 @@ def test_backquoted_embedded_backquote_is_unescaped(spec_key):
 
 
 # ---------------------------------------------------------------------------
-# BUG 2 -- over-collection
+# BUG 2 (FIXED) -- over-collection
+#
+# `extract_namespaces` used to collect *every* `ErrorCapturingIdentifier` /
+# `MultipartIdentifier`, which are Spark's generic identifier rules and so also
+# carry column aliases, CTE names, column-definition names, table providers and
+# UPDATE/MERGE assignment targets. Collection is now restricted to the three
+# rules only ever used in a table position (`IdentifierReferenceContext`,
+# `TemporalTableIdentifierReferenceContext`, `TableIdentifierContext`), plus a
+# bare generic identifier whose enclosing rule is table-bearing.
 # ---------------------------------------------------------------------------
 
-BUG2 = pytest.mark.xfail(
-    reason=(
-        "BUG 2: extract_namespaces collects every ErrorCapturingIdentifier / "
-        "MultipartIdentifier, including column aliases, CTE names, column-definition "
-        "names and table providers. The extractor cannot tell a table position from "
-        "a column position, so SELECT aliases leak into the target list. "
-        "Fix: restrict collection to IdentifierReferenceContext / "
-        "TemporalTableIdentifierReferenceContext, and allow a bare "
-        "ErrorCapturingIdentifier / MultipartIdentifier only under a table-bearing "
-        "parent rule."
-    ),
-    strict=False,
-)
 
-
-@BUG2
 @pytest.mark.parametrize("sql,noise", [
     # select-list column alias: `b` is an ErrorCapturingIdentifier directly under
     # NamedExpressionContext (`namedExpression : expression (AS? name=errorCapturingIdentifier)?`)
     ("select a as b from t", "b"),
     ("select 1 as one, x.y as z from t", "one"),
     ("select 1 as one, x.y as z from t", "z"),
-    # CTE name: `q` is an ErrorCapturingIdentifier under NamedQueryContext
-    ("with q as (select * from prod.t) select * from q", "q"),
+    # CTE *definition* name: `q` is an ErrorCapturingIdentifier under
+    # NamedQueryContext. Note the FROM clause deliberately reads `select 1`, not
+    # `select * from q` -- see the comment on
+    # test_cte_reference_in_from_is_still_a_table below.
+    ("with q as (select * from prod.t) select 1", "q"),
     # column-definition name: `a` is an ErrorCapturingIdentifier under ColDefinitionContext
     ("create table prod.t (a int) using parquet", "a"),
     # table provider: `parquet` is a MultipartIdentifier under TableProviderContext
@@ -500,7 +511,25 @@ def test_namespace_extraction_does_not_over_collect(sql, noise, spec_key):
     )
 
 
-@BUG2
+def test_cte_reference_in_from_is_still_a_table(spec_key):
+    """A CTE name used in FROM is a table position and must be reported.
+
+    This is the boundary case the over-collection fix must not overshoot. `q` is
+    dropped where it *defines* the CTE (`NamedQueryContext > errorCapturingIdentifier`)
+    but kept where it *references* one -- `FROM q` parses as
+    `TableNameContext > TemporalTableIdentifierReferenceContext`, which is a
+    table-bearing rule. Dropping it would be the fail-closed mistake: the
+    screener would report no tables read at all.
+
+    The two occurrences of `q` are genuinely different nodes, so the statement
+    legitimately reports it once.
+    """
+    assert sorted(names("with q as (select * from prod.t) select * from q",
+                        spec_key)) == ["prod.t", "q"]
+    # ...while the definition site alone contributes nothing
+    assert names("with q as (select * from prod.t) select 1", spec_key) == ["prod.t"]
+
+
 def test_literal_only_select_has_no_namespaces(spec_key):
     """`SELECT 'x' AS label` names no object at all -- not even a table.
 
@@ -510,7 +539,6 @@ def test_literal_only_select_has_no_namespaces(spec_key):
     assert names("select 'x' as label", spec_key) == []
 
 
-@BUG2
 def test_join_aliases_are_not_reported(spec_key):
     """The example from the bug report: aliases x/y must not appear."""
     got = sorted(names(
@@ -525,19 +553,133 @@ def test_insert_into_target_is_found_even_though_the_query_is_narrowed(spec_key)
     assert names("insert into prod.t select * from other.s", spec_key) == ["prod.t"]
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Not the reported bug, found while validating the BUG 2 fix: on 3.5.1 "
-        "`createTableLike` uses `tableIdentifier` (a distinct rule) rather than "
-        "`identifierReference`, and `TableIdentifierContext` is absent from "
-        "_IDENTIFIER_REF_RULES, so no namespace is found at all for "
-        "`CREATE TABLE t2 LIKE prod.t`. Fix: add TableIdentifierContext to "
-        "_IDENTIFIER_REF_RULES (it is table-position in both grammars)."
-    ),
-    strict=False,
-)
 def test_create_table_like_finds_both_tables(spec_key):
     assert sorted(names("create table t2 like prod.t", spec_key)) == ["prod.t", "t2"]
+
+
+def test_create_table_like_source_is_found_on_both_grammars():
+    """The 3.5.1-specific half of the CREATE TABLE LIKE fix.
+
+    3.5.1's `createTableLike` uses `tableIdentifier` where 4.0 uses
+    `identifierReference`, so before `TableIdentifierContext` was recognised the
+    source table was simply not reported on 3.5.1 -- a read of a table the
+    screener could not see. Asserted per-grammar (not via the `spec_key`
+    fixture) because the whole point is that the two grammars take different
+    paths to the same answer.
+    """
+    for key in BOTH:
+        assert "prod.t" in names("create table t2 like prod.t", key), (
+            f"{key} did not find the LIKE source table"
+        )
+
+
+def test_hive_alter_table_forms_use_tableidentifier_and_are_still_found():
+    """The other `tableIdentifier` positions: the Hive `ALTER TABLE` family.
+
+    Spark 4.0 added these (cluster by / not clustered / sorted / skewed by /
+    set skewed location / exchange / archive / unarchive / touch / compact /
+    concatenate / set fileformat / replace columns). They route the table
+    through `tableIdentifier` rather than `identifierReference`, so they exercise
+    the same fix. The two common to both pins are asserted on both.
+    """
+    assert names("alter table t cluster by (a, b)", V4) == ["t"]
+    assert names("alter table t touch", V4) == ["t"]
+    assert names("alter table t compact", V4) == ["t"]
+    # present in both grammars
+    for key in BOTH:
+        assert names("alter table t not clustered", key) == ["t"]
+        assert names("alter table t exchange partition (p=1)", key) == ["t"]
+
+
+def test_destructive_targets_are_never_lost_to_the_narrowing(spec_key):
+    """The non-negotiable: the narrowing must not drop a table.
+
+    Each of these is a statement whose *whole point* is the table it names. A
+    narrower extractor that returned `[]` for any of them would make a
+    destructive statement look harmless, which is the fail-open direction. This
+    is the guard against a future "tidy up _BARE_TABLE_BEARING_RULES" edit.
+    """
+    cases = [
+        ("drop table prod.users", ["prod.users"]),
+        ("drop table if exists `prod`.`users` purge", ["prod.users"]),
+        ("truncate table prod.t", ["prod.t"]),
+        ("delete from prod.t where id = 1", ["prod.t"]),
+        ("insert overwrite table prod.t select 1", ["prod.t"]),
+        ("insert into prod.t values (1)", ["prod.t"]),
+        ("update prod.t set a = 1", ["prod.t"]),
+        ("load data inpath '/x' into table prod.users", ["prod.users"]),
+        ("msck repair table prod.t", ["prod.t"]),
+        ("alter table prod.t set tblproperties ('a'='b')", ["prod.t"]),
+        ("analyze table prod.t compute statistics", ["prod.t"]),
+        ("comment on table prod.t is 'x'", ["prod.t"]),
+        ("cache table prod.t", ["prod.t"]),
+    ]
+    for sql, expected in cases:
+        got = names(sql, spec_key)
+        assert sorted(got) == sorted(expected), (
+            f"{sql!r} yielded {got}, expected {expected}"
+        )
+
+
+def test_merge_reports_both_tables_but_not_the_assignment_target(spec_key):
+    """MERGE names two tables and one column assignment.
+
+    `s.x` on the left of `SET` is a `MultipartIdentifier` under
+    `AssignmentContext` -- the same generic rule a table name would use. Both
+    `a.b` and `c.d` must survive; `s` must not.
+    """
+    got = sorted(names("merge into a.b s using c.d t on s.i = t.i "
+                       "when matched then update set s.x = t.x", spec_key))
+    assert got == ["a.b", "c.d"]
+
+
+def test_table_provider_and_column_defs_are_not_namespaces(spec_key):
+    """`CREATE TABLE ... (a int) using parquet` names one object: the table.
+
+    `a` is a `ColDefinitionContext > ErrorCapturingIdentifier`; `parquet` is a
+    `TableProviderContext > MultipartIdentifier`. Asserted as a whole-result
+    equality so a future regression that swaps one for another is visible.
+    """
+    assert names("create table prod.t (a int, b string) using parquet", spec_key) == [
+        "prod.t"
+    ]
+    assert names("create table t using delta", spec_key) == ["t"]
+
+
+def test_alter_table_rename_column_reports_only_the_table(spec_key):
+    """`RENAME COLUMN a TO b` names the table and two *columns*.
+
+    Both column identifiers are generic rules directly under
+    `RenameTableColumnContext` -- precisely the shape `_BARE_TABLE_BEARING_RULES`
+    must NOT whitelist, so this pins that the safety net does not over-reach.
+    """
+    assert names("alter table t rename column a to b", spec_key) == ["t"]
+
+
+def test_bare_generic_identifier_is_collected_under_a_table_bearing_parent():
+    """The conditional path in `_walk` is exercised, not just the unconditional one.
+
+    `TableIdentifierContext` is in `_BARE_TABLE_BEARING_RULES`, so the
+    `ErrorCapturingIdentifier` children of a 3.5.1 `CREATE TABLE LIKE` are
+    collected through the parent-rule branch. Asserted on the rule set directly
+    so the branch cannot be quietly deleted.
+    """
+    from sparkscreen.analysis.treewalk import (
+        _BARE_TABLE_BEARING_RULES,
+        _GENERIC_IDENTIFIER_RULES,
+        _IDENTIFIER_REF_RULES,
+    )
+    # the generic rules are NOT unconditionally collected -- that was BUG 2
+    assert not set(_GENERIC_IDENTIFIER_RULES) & set(_IDENTIFIER_REF_RULES)
+    assert "TableIdentifierContext" in _IDENTIFIER_REF_RULES
+    assert "TableIdentifierContext" in _BARE_TABLE_BEARING_RULES
+    # and the table-bearing set must not swallow the column-shaped rules
+    for columnish in ("RenameTableColumnContext", "TableProviderContext",
+                      "AssignmentContext", "NamedExpressionContext",
+                      "ColDefinitionContext", "NamedQueryContext"):
+        assert columnish not in _BARE_TABLE_BEARING_RULES, (
+            f"{columnish} would make the extractor report a column as a namespace"
+        )
 
 
 # ===========================================================================
@@ -583,9 +725,25 @@ def test_location_spec_is_found(spec_key):
         "create table t (a int) using parquet location 's3://bucket/path'", spec_key)
 
 
-def test_escaped_single_quote_is_unescaped(spec_key):
-    """`''` is Spark's escape for a literal quote inside a string."""
-    assert "it's" in literals("select 'it''s' as a", spec_key)
+def test_escaped_single_quote_is_unescaped_4_0():
+    """`''` is Spark 4.0's escape for a literal quote inside a string.
+
+    4.0's STRING_LITERAL lexer rule carries the `('\'' '\'')` alternative, so
+    `'it''s'` is ONE token and `_unquote` collapses `''` to `'`.
+    """
+    assert literals("select 'it''s' as a", V4) == ["it's"]
+
+
+def test_escaped_single_quote_is_two_literals_on_3_5_1():
+    """3.5.1 has no `''` escape, so `'it''s'` lexes as two adjacent literals.
+
+    3.5.1's rule is `'\'' ( ~('\''|'\\') | ('\\' .) )* '\''` -- the
+    `('\'' '\'')` alternative was added in 4.0. Reporting `['it', 's']` is
+    faithful to what the 3.5.1 engine actually sees, so this is correct
+    behaviour rather than a bug, and it is pinned so the difference cannot be
+    "fixed" into a lie on 3.5.1.
+    """
+    assert literals("select 'it''s' as a", V351) == ["it", "s"]
 
 
 def test_backslash_escape_is_left_alone(spec_key):
@@ -618,12 +776,71 @@ def test_tblproperties_key_and_value_are_both_found(spec_key):
     assert sorted(lits) == ["a", "b"]
 
 
-def test_execute_immediate_hides_sql_from_the_top_level(spec_key):
+def test_execute_immediate_hides_sql_from_the_top_level():
     """`EXECUTE IMMEDIATE 'DROP TABLE ...'` never appears as a top-level
     statement, so a policy that only walks statements would miss it entirely."""
     sql = "EXECUTE IMMEDIATE 'DROP TABLE prod.users'"
-    _, tree = parse_one(sql, spec_key)
+    _, tree = parse_one(sql, V4)
+    assert statement_label(tree) is not None
+    # the inner SQL *is* recoverable from the tree -- the string literal holds it
+    assert literals(sql, V4) == ["DROP TABLE prod.users"]
+
+
+# THIRD BUG (FIXED) -- EXECUTE IMMEDIATE payload was invisible
+#
+# `executed_immediate_sql` iterated only the DIRECT children of the node it was
+# given, but `VisitExecuteImmediateContext` sits two levels down
+# (CompoundOrSingleStatement > SingleStatement > VisitExecuteImmediate) and
+# `screen._check_execute_immediate` passes the parse-tree ROOT. So it found
+# nothing, and every EXECUTE IMMEDIATE payload went unscreened -- the fail-open
+# direction. The search now recurses.
+#
+# Note this is Spark 4.0-only syntax. The 3.5.1 pin has no EXECUTE token and no
+# `visitExecuteImmediate` alternative at all, so it is a syntax error there --
+# pinned below rather than asserted to yield a payload.
+
+
+def test_execute_immediate_is_rejected_by_3_5_1():
+    """`EXECUTE IMMEDIATE` does not exist in 3.5.1.
+
+    Pinned so the one-grammar-only tests below stay honest: the statement is a
+    syntax error on 3.5.1, not a payload the extractor fails to find.
+    """
+    with pytest.raises(SqlSyntaxError):
+        get_parser(V351).parse("EXECUTE IMMEDIATE 'DROP TABLE prod.users'")
+    # 4.0 accepts it
+    get_parser(V4).parse("EXECUTE IMMEDIATE 'DROP TABLE prod.users'")
+
+
+def test_executed_immediate_sql_finds_the_hidden_statement():
+    _, tree = parse_one("EXECUTE IMMEDIATE 'DROP TABLE prod.users'", V4)
     assert executed_immediate_sql(tree) == ["DROP TABLE prod.users"]
+
+
+def test_executed_immediate_sql_works_from_the_parse_root():
+    """The real call shape: `screen` hands this the tree ROOT, not a statement.
+
+    Asserting only on a statement subtree would pass even with the old
+    direct-children bug, because the statement subtree's direct child *is* the
+    VisitExecuteImmediate. This is the regression guard that actually pins it.
+    """
+    tree = get_parser(V4).parse("EXECUTE IMMEDIATE 'DROP TABLE prod.users'").tree
+    assert executed_immediate_sql(tree) == ["DROP TABLE prod.users"]
+
+
+def test_executed_immediate_sql_returns_empty_without_execute_immediate():
+    """No VisitExecuteImmediate anywhere -> empty list, never a false positive."""
+    tree = get_parser(V4).parse("SELECT 1").tree
+    assert executed_immediate_sql(tree) == []
+
+
+def test_execute_immediate_drop_is_screened_as_a_statement():
+    """End-to-end: the hidden DROP must produce a finding, not pass silently."""
+    from sparkscreen import screen
+
+    report = screen("spark.sql(\"EXECUTE IMMEDIATE 'DROP TABLE prod.users'\")")
+    labels = [f.statement for f in report.findings]
+    assert "DropTable" in labels, f"hidden DROP was not screened; got {labels}"
 
 
 # ===========================================================================
@@ -812,7 +1029,7 @@ def test_statements_without_identifiers_yield_empty_lists(sql, expected, spec_ke
 
 def test_statement_with_only_a_literal_has_no_namespaces(spec_key):
     """`SELECT 'x'` names no object; an empty target list is the honest answer."""
-    _, tree = parse_one("select 'x' as label", spec_key)
+    _, tree = parse_one("select 'x'", spec_key)
     assert extract_namespaces(tree, grammar_key=spec_key) == []
 
 
@@ -865,7 +1082,6 @@ def test_identifier_token_numbers_differ_between_grammars():
 @pytest.mark.parametrize("sql", [
     "drop table prod.users",
     "select * from prod.t",
-    "select * from `prod`.`users`",
     "truncate table prod.users",
     "delete from prod.t where id = 1",
 ])
@@ -877,12 +1093,35 @@ def test_grammar_key_must_match_the_parser_it_came_from(sql, spec_key):
     pinned as a differential: wrong key is empty, right key is correct. An
     empty result is the dangerous direction (a destructive target goes
     unreported), which is why `screen.py` threads `spec.key` through.
+
+    Unquoted identifiers only -- a backquoted one is resolved via
+    `BackQuotedIdentifierContext` by context class, so it resolves identically
+    under either key and is covered separately below.
     """
     other = V351 if spec_key == V4 else V4
     right = names(sql, spec_key)
     assert right, f"{sql!r} yielded nothing even with the matching key"
     _, tree = parse_one(sql, spec_key)
     assert [n.name for n in extract_namespaces(tree, grammar_key=other)] == []
+
+
+@pytest.mark.parametrize("sql", ["select * from `prod`.`users`",
+                                 "select `a` from `prod`.`users`"])
+def test_backquoted_identifiers_resolve_regardless_of_grammar_key(sql, spec_key):
+    """Backquoted identifiers are resolved by context class, not token number.
+
+    ``_parts`` handles `QuotedIdentifierContext`/`BackQuotedIdentifierContext`
+    before it ever looks at token types, so quoting is immune to the
+    token-numbering difference. That is a *good* property for the security
+    story -- quoting cannot be used to make a name invisible -- so it is pinned
+    rather than left implicit.
+    """
+    other = V351 if spec_key == V4 else V4
+    _, tree = parse_one(sql, spec_key)
+    with_right = [n.name for n in extract_namespaces(tree, grammar_key=spec_key)]
+    with_other = [n.name for n in extract_namespaces(tree, grammar_key=other)]
+    assert "prod.users" in with_right
+    assert with_other == with_right
 
 
 def test_grammar_key_defaults_to_the_default_spec():

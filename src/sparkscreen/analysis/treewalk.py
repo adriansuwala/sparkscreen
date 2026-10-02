@@ -211,13 +211,61 @@ def effective_label(ctx: ParseTree) -> str:
 # identifier extraction
 # ---------------------------------------------------------------------------
 
-# Rule contexts that hold a single table/namespace reference.
+#: Recursion cap for the tree walks. Deep enough for any statement shape the pinned
+#: grammars produce (the deepest observed is the query hierarchy at ~10 levels), and a
+#: backstop against pathological nesting -- a walk is `extract_*` inside `screen()`, so
+#: an unbounded recursion would be a crash, i.e. a policy decision replaced by a
+#: traceback. Extraction is best-effort by design; a too-deep subtree is reported as
+#: "nothing found", which is the same as not finding an identifier.
+_MAX_WALK_DEPTH = 64
+
+# Rule contexts that are *themselves* a table/namespace reference. These are the only
+# identifier rules Spark uses in a table position, so they are safe to collect
+# unconditionally:
+#
+#   identifierReference                     -- drop/insert/alter/create/use/describe...
+#   temporalTableIdentifierReference        -- a FROM/JOIN relation
+#   tableIdentifier                         -- 3.5.1's `CREATE TABLE t2 LIKE prod.t`
+#                                           -- and the Hive `ALTER TABLE ... CLUSTER BY`
+#                                              family, which never went via identifierReference
+#
+# The generic identifier rules (`errorCapturingIdentifier`, `multipartIdentifier`) are
+# deliberately NOT in this set: they are Spark's *any* identifier, so they also carry
+# column aliases, CTE names, column-definition names, table providers and UPDATE/MERGE
+# assignment targets. Collecting them makes `SELECT a AS b FROM t` report `b` as a
+# namespace. They are handled conditionally by `_is_bare_table_ref` instead.
 _IDENTIFIER_REF_RULES = (
     "IdentifierReferenceContext",
+    "TemporalTableIdentifierReferenceContext",
+    "TableIdentifierContext",
+)
+
+#: Generic identifier rules. Only collected when the enclosing rule is table-bearing.
+_GENERIC_IDENTIFIER_RULES = (
     "MultipartIdentifierContext",
     "ErrorCapturingIdentifierContext",
-    "TemporalTableIdentifierReferenceContext",
 )
+
+#: Rules whose bare `multipartIdentifier` / `errorCapturingIdentifier` child is a table
+#: name rather than a column, alias, provider or path.
+#:
+#: Spark routes table names through `identifierReference` / `temporalTableIdentifierReference`
+#: / `tableIdentifier` essentially everywhere, so in practice this safety net catches
+#: nothing today -- the three rules above are sufficient. It exists so that a grammar
+#: position that does use a bare generic identifier for a table is still reported rather
+#: than silently dropped, and it is deliberately biased toward over-reporting: a missed
+#: table means a destructive target escapes a namespace allowlist, whereas a spurious
+#: column name at worst adds a name the policy will not match. When in doubt, add the
+#: rule here.
+#:
+#: Note which rules are deliberately ABSENT despite looking table-bearing:
+#: `RenameTableColumnContext` (its identifiers are column names), `TableProviderContext`
+#: (a provider class, not a table), `PartitionSpecContext` (partition names) and the
+#: `InsertOverwrite*DirContext` rules (storage paths, which `extract_string_literals`
+#: already covers).
+_BARE_TABLE_BEARING_RULES = frozenset({
+    "TableIdentifierContext",
+})
 
 #: Token *names* that are identifiers. A plain identifier reaches the tree as a bare
 #: terminal (possibly with DOT between parts), so terminals must be collected too --
@@ -262,9 +310,15 @@ _STRING_PATH_RULES = (
 def extract_namespaces(ctx: ParseTree, *, grammar_key: str | None = None) -> list[NamespaceRef]:
     """Every table/namespace identifier appearing under `ctx`.
 
-    Only whole identifier references are collected, and each is normalised to a dotted
-    `NamespaceRef`. Aliases and column names are deliberately not reported as targets:
-    a policy that has to reason about `FROM t AS x` shouldn't be handed `x`.
+    Only *table* identifiers are collected. Spark's grammar spells every identifier with
+    one of a handful of generic rules, and those same rules carry column aliases, CTE
+    names, column-definition names, table providers and UPDATE/MERGE assignment targets.
+    Collecting them all makes `SELECT a AS b FROM t` report `b` as a namespace, so
+    collection is restricted to the three rules that are only ever used in a table
+    position, plus a bare generic identifier whose enclosing rule is table-bearing.
+
+    A dropped table is much worse than a reported column: the namespace list feeds
+    allowlists and drop targets. Where the two goals conflict, this over-reports.
     """
     found: list[NamespaceRef] = []
     _walk(ctx, found, collect=True, grammar_key=grammar_key)
@@ -278,9 +332,12 @@ def extract_namespaces(ctx: ParseTree, *, grammar_key: str | None = None) -> lis
 
 
 def _walk(node: ParseTree, found: list[NamespaceRef], collect: bool = True,
-          *, grammar_key: str | None = None) -> None:
+          *, grammar_key: str | None = None, parent: ParseTree | None = None) -> None:
     cls = type(node).__name__
-    if collect and cls in _IDENTIFIER_REF_RULES:
+    if collect and (
+        cls in _IDENTIFIER_REF_RULES
+        or (cls in _GENERIC_IDENTIFIER_RULES and _is_bare_table_ref(node, parent))
+    ):
         ref = _resolve_ref(node, grammar_key=grammar_key)
         if ref is not None:
             found.append(ref)
@@ -290,7 +347,23 @@ def _walk(node: ParseTree, found: list[NamespaceRef], collect: bool = True,
             # a target.
             return
     for c in getattr(node, "children", []) or []:
-        _walk(c, found, collect, grammar_key=grammar_key)
+        _walk(c, found, collect, grammar_key=grammar_key, parent=node)
+
+
+def _is_bare_table_ref(node: ParseTree, parent: ParseTree | None) -> bool:
+    """True if a bare generic identifier is in a table position.
+
+    `ErrorCapturingIdentifier` / `MultipartIdentifier` are Spark's *generic* identifier
+    rules -- the same two rules express a column alias, a CTE name, a column-definition
+    name, a table provider, an UPDATE/MERGE assignment target and (in principle) a table.
+    Nothing inside the node distinguishes them, so the decision has to come from the
+    enclosing rule.
+    """
+    if parent is None:
+        # A bare generic identifier at the root of the walk. Only reachable if a caller
+        # passed such a context in directly; report it rather than drop it.
+        return True
+    return type(parent).__name__ in _BARE_TABLE_BEARING_RULES
 
 
 def _is_identifier_token(node: ParseTree) -> bool:
@@ -401,10 +474,27 @@ def executed_immediate_sql(ctx: ParseTree) -> list[str]:
 
     These are real statements Spark will run but which never appear as top-level
     statements, so a policy that only looks at top level misses them entirely.
+
+    The search recurses. `screen._check_execute_immediate` hands this the parse-tree
+    ROOT, and `VisitExecuteImmediateContext` sits two levels down on 4.0
+    (`CompoundOrSingleStatement > SingleStatement > VisitExecuteImmediate`) -- so
+    walking only the root's direct children finds nothing at all, and every
+    `EXECUTE IMMEDIATE` payload goes unscreened. That is the fail-open direction, so
+    the recursion is not optional.
     """
     out: list[str] = []
-    for c in getattr(ctx, "children", []) or []:
-        if type(c).__name__ == "VisitExecuteImmediateContext":
-            for lit in extract_string_literals(c):
-                out.append(lit)
+
+    def rec(n: ParseTree, depth: int = 0) -> None:
+        if depth > _MAX_WALK_DEPTH:
+            return
+        if type(n).__name__ == "VisitExecuteImmediateContext":
+            out.extend(extract_string_literals(n))
+            # Don't descend into it: the payload is a string literal, so a nested
+            # EXECUTE IMMEDIATE cannot appear structurally here.
+            return
+        for c in getattr(n, "children", []) or []:
+            rec(c, depth + 1)
+
+    rec(ctx)
     return out
+
