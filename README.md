@@ -169,14 +169,13 @@ commit message on `f3c1f39`.
 
 ## Documentation
 
-Written records of what this project decided and what it got wrong — the reasoning is
-most of the value, and it should survive past any one conversation.
+**For users** — [usage guide](docs/user-docs/usage.md): verdicts, CLI, library API,
+policies, limits, troubleshooting. The sections below are the quick version.
 
-- [docs/findings](docs/findings.md) — every bug found, each with a live reproducer
-- [docs/decisions](docs/decisions.md) — numbered decisions and what the alternatives cost
-- [docs/threads](docs/threads.md) — open questions, feasibility notes, musings
-- [docs/roadmap](docs/roadmap.md) — current state and what is next
-- [CONTRIBUTING](CONTRIBUTING.md) — branch policy and the three corpus-writing lessons
+**For contributors and agents** — [working documents](docs/WORKING.md), which index
+[findings](docs/findings.md) (every bug found, with live reproducers),
+[decisions](docs/decisions.md), [open threads](docs/threads.md),
+[roadmap](docs/roadmap.md) and [agent conventions](docs/agents.md).
 
 `docs/findings.md` is the one to read first if you are deciding whether to trust this
 tool. Almost every bug found here was a **fail-open** — the screener reported ALLOW,
