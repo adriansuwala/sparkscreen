@@ -293,33 +293,67 @@ def test_parse_is_deterministic(key, sql):
 def test_lexer_state_does_not_leak_between_parses(key, sql):
     """PROPERTY: a parse does not change how the *next* parse behaves.
 
-    Directly targets the mutable lexer members the port added. If the
-    complex-type-level counter or the tag deque survived a parse, then
-    `STRUCT<a: INT>` would leak state into an unrelated following statement --
+    Directly targets the mutable lexer members the port added
+    (`complex_type_level_counter`, the dollar-quote tag deque, the
+    `has_unclosed_bracketed_comment` flag). A leak there would make a statement
+    parse differently the second time, depending on what was parsed before it --
     order-dependent screening results, which is close to undebuggable.
+
+    The interleaved statements are chosen for what they do to that state, not for
+    whether they parse on their own: `SELECT $$x$$` trips the dollar-quote tag push
+    and pops, and `CAST(a AS STRUCT<b: INT>)` drives the type-level counter up and
+    down. Note `$$x$$` is *rejected* by the parser (it is a codeLiteral, not a
+    string), so it is driven for its lexer side effect and the rejection is fine.
     """
     parser = _parser(key)
-    parser.parse(sql)
-    parser.parse("SELECT $$x$$")
-    parser.parse("SELECT CAST(a AS STRUCT<b: INT>) FROM t")
+    for interleave in (
+        "SELECT 1",
+        "SELECT $$x$$",
+        "SELECT CAST(a AS STRUCT<b: INT>) FROM t",
+        "/* unclosed",
+    ):
+        try:
+            parser.parse(interleave)
+        except SqlSyntaxError:
+            pass
     assert parser.parse(sql).label == parser.parse(sql).label
 
 
-@given(key=st.sampled_from(KEYS), sql=_SQL_TEXT)
-def test_script_flattening_is_a_partition_of_the_script(key, sql):
-    """PROPERTY: BEGIN...END flattening yields statements that are all parseable.
+@given(key=st.sampled_from(["spark-4.0"]), sql=_SQL_TEXT)
+def test_script_flattening_yields_all_statements(key, sql):
+    """PROPERTY: a BEGIN...END script yields one statement per inner statement.
 
     `_flatten` runs `effective_label` and `_tighten` over the tree, both of which
-    re-point at inner subtrees. A bug there would hand the policy layer a context
-    whose label and subtree disagree -- the exact confusion `_tighten` exists to
-    prevent.
+    re-point at inner subtrees. A bug there hands the policy layer a context whose
+    label and subtree disagree -- the exact confusion `_tighten` exists to prevent.
+
+    Scoped to spark-4.0: `BEGIN...END` scripts are a 4.0 addition, and 3.5.1
+    correctly rejects them (there is no `compoundOrSingleStatement` rule to reach).
     """
     parser = _parser(key)
     single = parser.parse(sql)
     script = parser.parse(f"BEGIN {sql}; {sql}; END")
     labels = [s.label for s in script.statements]
-    assert all(labels), f"{key}: empty statement label in script: {labels}"
-    assert single.label in labels or len(labels) == 2
+    assert len(labels) == 2, f"expected 2 statements, got {labels}"
+    assert all(labels), f"empty statement label in script: {labels}"
+    assert single.label in labels
+
+
+@given(key=st.sampled_from(KEYS), sql=_SQL_TEXT)
+def test_single_statement_and_one_statement_script_agree(key, sql):
+    """PROPERTY: wrapping a statement in a one-statement script changes nothing.
+
+    Holds on both grammars: 4.0 has the script rules, 3.5.1 rejects the wrapper, and
+    "the wrapper is not silently accepted and mis-flattened" is the property that
+    matters on 3.5.1.
+    """
+    parser = _parser(key)
+    single = parser.parse(sql)
+    try:
+        script = parser.parse(f"BEGIN {sql}; END")
+    except SqlSyntaxError:
+        return          # 3.5.1: no script support, and that is correct
+    assert [s.label for s in script.statements] == [single.label]
 
 
 # ===========================================================================
