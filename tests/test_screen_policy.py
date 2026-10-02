@@ -35,7 +35,7 @@ from sparkscreen.cli import (
     EXIT_UNKNOWN,
     main,
 )
-from sparkscreen.model import UNKNOWN_REASONS
+from sparkscreen.model import ANALYSIS_FAILURE_REASONS
 from sparkscreen.policy import (
     DESTRUCTIVE_LABELS,
     READ_ONLY_LABELS,
@@ -122,7 +122,7 @@ class TestDenyVerdicts:
 
     def test_summary_counts(self, spec_key):
         report = screen(sql_call("DROP TABLE prod.users"), spec=spec_key)
-        assert report.summary() == "DENY: 1 deny, 0 unknown, 0 allow"
+        assert report.summary() == "DENY: 1 deny, 0 unknown, 0 review, 0 allow"
 
     def test_deny_outranks_a_concurrent_unknown(self, spec_key):
         """One denied sink and one unresolvable sink: DENY is the report verdict."""
@@ -133,7 +133,7 @@ class TestDenyVerdicts:
         )
         report = screen(source, spec=spec_key)
         assert report.verdict is Verdict.DENY
-        assert report.summary() == "DENY: 1 deny, 1 unknown, 0 allow"
+        assert report.summary() == "DENY: 1 deny, 1 unknown, 0 review, 0 allow"
 
     def test_multiple_sinks_each_produce_a_finding(self, spec_key):
         source = (
@@ -176,7 +176,7 @@ class TestAllowVerdicts:
         assert report.verdict is Verdict.ALLOW
         assert report.ok
         assert report.findings == []
-        assert report.summary() == "ALLOW: 0 deny, 0 unknown, 0 allow"
+        assert report.summary() == "ALLOW: 0 deny, 0 unknown, 0 review, 0 allow"
 
     def test_dataframe_api_does_not_trigger_the_sql_sink_detector(self, spec_key):
         """`spark.table` / `df.filter` take strings but are not SQL sinks.
@@ -281,6 +281,14 @@ class TestUnknownVerdicts:
         assert report.verdict is Verdict.UNKNOWN
 
     def test_delete_update_merge_need_review_not_deny(self, spec_key):
+        """REVIEW, not DENY, and not UNKNOWN either.
+
+        These are parsed perfectly well -- the label, the table and the effect are all
+        known. They are REVIEW because the policy deliberately routes row mutation to a
+        human rather than blocking it, which is a different statement from "we could not
+        work out what this does". That distinction is the entire reason the scale has
+        four values, so it is asserted exactly.
+        """
         for sql in (
             "delete from prod.t where id = 1",
             "update prod.t set a = 1 where id = 2",
@@ -288,8 +296,9 @@ class TestUnknownVerdicts:
             "update set *",
         ):
             report = screen(sql_call(sql), spec=spec_key)
-            assert report.verdict is Verdict.UNKNOWN, sql
+            assert report.verdict is Verdict.REVIEW, (sql, report.verdict)
             assert not report.ok
+            assert not report.analysis_failures
 
     def test_dml_is_flagged_as_row_mutation_by_the_dml_rule(self, spec_key):
         """DELETE/UPDATE/MERGE reach the row-mutation rule, not a generic miss.
@@ -332,10 +341,16 @@ class TestUnknownVerdicts:
         via UNPARSEABLE_SQL. Both paths are UNKNOWN; only the reason differs.
         """
         report = screen(sql_call("CALL p()"), spec=spec_key)
-        assert report.verdict is Verdict.UNKNOWN
         assert not report.ok
         assert reasons(report) <= {Reason.UNSUPPORTED_STATEMENT,
                                    Reason.UNPARSEABLE_SQL}
+        # The two grammars land on opposite ends of the scale, and that is correct:
+        # the newest grammar parses it and has no rule (REVIEW), while the pinned 3.5.1
+        # grammar rejects it outright, so there is nothing to review (UNKNOWN).
+        if Reason.UNPARSEABLE_SQL in reasons(report):
+            assert report.verdict is Verdict.UNKNOWN
+        else:
+            assert report.verdict is Verdict.REVIEW
 
     def test_unknown_outranks_a_concurrent_allow(self, spec_key):
         source = (
@@ -513,18 +528,26 @@ class TestWritableNamespaceAllowlist:
                         policy_with_writable("staging.*"), spec=spec_key)
         assert Reason.OUTSIDE_ALLOWLIST in reasons(report)
 
-    def test_outside_allowlist_is_verdict_unknown(self, spec_key):
-        """Out-of-allowlist means needs-review, so UNKNOWN -- not DENY.
+    def test_outside_allowlist_is_review_not_deny(self, spec_key):
+        """Out-of-allowlist is REVIEW -- the weaker verdict, deliberately.
 
-        The deny rule also matches, but the report-level verdict must be the
-        weaker UNKNOWN: a caller triaging by exit code must not read
-        "outside the allowlist" as "blocked".
+        The deny rule also matches, but the allowlist objection is what a human needs
+        to see, so it becomes the primary finding and the report verdict is REVIEW.
+        A caller triaging by exit code must not read "outside the allowlist" as
+        "blocked by policy".
+
+        This also pins the `_combine` ordering, which had to change when REVIEW was
+        split out from UNKNOWN: it used to look for the UNKNOWN finding and fell
+        through to a DENY once the allowlist started emitting REVIEW, dropping
+        `OUTSIDE_ALLOWLIST` from the report entirely.
         """
         report = screen(sql_call("DROP TABLE prod.foo"),
                         policy_with_writable("staging.*"), spec=spec_key)
-        assert report.verdict is Verdict.UNKNOWN
+        assert report.verdict is Verdict.REVIEW
         assert not report.ok
-        assert "prod.foo" in report.by_verdict(Verdict.UNKNOWN)[0].targets
+        assert "prod.foo" in report.by_verdict(Verdict.REVIEW)[0].targets
+        # and the rule verdict is not lost, only demoted
+        assert Reason.OUTSIDE_ALLOWLIST in reasons(report)
 
 
 class TestReadableNamespaceAllowlist:
@@ -540,7 +563,7 @@ class TestReadableNamespaceAllowlist:
         report = screen(sql_call("select * from secret.salaries"), policy,
                         spec=spec_key)
         assert not report.ok
-        assert report.verdict is Verdict.UNKNOWN
+        assert report.verdict is Verdict.REVIEW
         assert Reason.OUTSIDE_ALLOWLIST in reasons(report)
 
     def test_read_inside_allowlist_is_ok(self, spec_key):
@@ -731,16 +754,20 @@ class TestCliExitCodes:
         """An out-of-scope read must exit 2, not 0.
 
         This is the exit-code half of the fail-closed contract: the CLI used to
-        gate on `f.reason in UNKNOWN_REASONS` while Reason.OUTSIDE_ALLOWLIST was
+        gate on `f.reason in ANALYSIS_FAILURE_REASONS` while Reason.OUTSIDE_ALLOWLIST was
         absent from that set, so it printed UNKNOWN and still exited 0 --
         silently bypassing any allowlist policy in a CI gate.
+
+        The printed verdict is REVIEW, not UNKNOWN: the allowlist check ran and
+        returned a negative. REVIEW and UNKNOWN share exit 2 on purpose -- the exit
+        status is the tool's binary gate, and the verdict is the richer answer.
         """
         policy = self.write_allowlist_policy(
             tmp_path, readable_namespaces=["prod.*"])
         path = write(tmp_path, "read.py",
                      sql_call("select * from secret.salaries"))
         code, out, _ = run_cli(path, "--policy", policy, "--no-color")
-        assert "UNKNOWN:" in out
+        assert "REVIEW:" in out
         assert code == EXIT_UNKNOWN
 
     def test_writable_allowlist_violation_must_exit_two(self, tmp_path):
@@ -749,7 +776,7 @@ class TestCliExitCodes:
             tmp_path, writable_namespaces=["staging.*"])
         path = write(tmp_path, "drop.py", sql_call("DROP TABLE prod.foo"))
         code, out, _ = run_cli(path, "--policy", policy, "--no-color")
-        assert "UNKNOWN:" in out
+        assert "REVIEW:" in out
         assert code == EXIT_UNKNOWN
 
     @pytest.mark.parametrize(
@@ -781,8 +808,12 @@ class TestCliExitCodes:
         code, out, _ = run_cli(path, "--policy", policy, "--no-color")
         printed = out.split()[0].rstrip(":")
         assert code == expected, f"printed {printed}, exit {code}"
+        # REVIEW and UNKNOWN share exit 2 on purpose: the tool's contract is
+        # binary -- safe to run, or a human looks at it. Which of the two it was
+        # is the verdict field, not the exit status.
         assert {"ALLOW": EXIT_ALLOW, "DENY": EXIT_DENY,
-                "UNKNOWN": EXIT_UNKNOWN}[printed] == code
+                "UNKNOWN": EXIT_UNKNOWN,
+                "REVIEW": EXIT_UNKNOWN}[printed] == code
 
     def test_policy_file_flag(self, tmp_path):
         policy = tmp_path / "policy.json"
@@ -944,18 +975,22 @@ class TestFailClosedInvariants:
     def test_screen_never_raises(self, spec_key, source):
         """Every failure mode must come back as a report, not an exception."""
         report = screen(source, spec=spec_key)
-        assert report.verdict in (Verdict.ALLOW, Verdict.DENY, Verdict.UNKNOWN)
+        assert report.verdict in (Verdict.ALLOW, Verdict.DENY, Verdict.UNKNOWN,
+                                  Verdict.REVIEW)
 
     @pytest.mark.parametrize("source", CORPUS, ids=range(len(CORPUS)))
-    def test_unknown_reason_is_never_paired_with_deny(self, spec_key, source):
+    def test_analysis_failure_reason_is_never_paired_with_deny(self, spec_key, source):
         """Invariant: no finding may be a DENY whose reason means 'could not tell'.
 
-        A DENY carrying an UNKNOWN_REASON would claim certainty the screener does
-        not have, and would make the DENY-vs-UNKNOWN triage meaningless.
+        A DENY carrying an analysis-failure reason would claim certainty the screener
+        does not have, and would make the triage meaningless. Note this is keyed on
+        the *reason set*, deliberately: it holds regardless of how the verdict scale
+        is arranged, so splitting UNKNOWN into UNKNOWN and REVIEW cannot weaken it.
         """
         report = screen(source, spec=spec_key)
         offenders = [f for f in report.findings
-                     if f.verdict is Verdict.DENY and f.reason in UNKNOWN_REASONS]
+                     if f.verdict is Verdict.DENY
+                     and f.reason in ANALYSIS_FAILURE_REASONS]
         assert not offenders, [f.to_dict() for f in offenders]
 
     @pytest.mark.parametrize("source", CORPUS, ids=range(len(CORPUS)))
@@ -966,6 +1001,8 @@ class TestFailClosedInvariants:
             assert report.verdict is Verdict.DENY
         elif any(f.is_unknown for f in report.findings):
             assert report.verdict is Verdict.UNKNOWN
+        elif any(f.needs_review for f in report.findings):
+            assert report.verdict is Verdict.REVIEW
         else:
             assert report.verdict is Verdict.ALLOW
 
@@ -1068,7 +1105,8 @@ class TestFindingModel:
             "spark.sql('select 1')\nspark.sql('DROP TABLE t')\n"
             "spark.sql('SELCT 1')\n", spec=spec_key)
         total = sum(len(report.by_verdict(v))
-                    for v in (Verdict.ALLOW, Verdict.DENY, Verdict.UNKNOWN))
+                    for v in (Verdict.ALLOW, Verdict.DENY, Verdict.UNKNOWN,
+                              Verdict.REVIEW))
         assert total == len(report.findings)
 
 
@@ -1148,12 +1186,23 @@ class TestPolicyUnit:
                          message="no")
         assert catch_all.applies_to("Anything") is True
 
-    def test_unrecognised_label_is_unknown(self):
+    def test_unrecognised_label_is_review_not_analysis_failure(self):
+        """A label with no rule is a REVIEW, not an UNKNOWN.
+
+        This one moved with the split and is the sharpest illustration of why. We
+        parsed the statement, we know its label and its targets; all we lack is an
+        opinion. `UNSUPPORTED_STATEMENT` reads like a failure and used to be
+        classified as one, so `Report.analysis_failures` counted it as "we could not
+        analyse this" -- which is false, and would have made the two dashboard numbers
+        disagree with each other.
+        """
         policy = default_policy()
         findings = policy.evaluate_statement("TotallyMadeUp", [], [])
         assert len(findings) == 1
-        assert findings[0].verdict is Verdict.UNKNOWN
+        assert findings[0].verdict is Verdict.REVIEW
         assert findings[0].reason is Reason.UNSUPPORTED_STATEMENT
+        assert not findings[0].is_analysis_failure
+        assert findings[0].needs_review
 
     def test_literal_prefix_rule_escalates_to_deny(self):
         from sparkscreen.policy import Rule
@@ -1171,14 +1220,18 @@ class TestPolicyUnit:
         """An empty Policy is not "deny everything": it is "trust READ_ONLY_LABELS".
 
         With no rules, a recognised read-only label is allowed and anything else
-        is UNKNOWN. Worth pinning because `Policy()` is the natural way to write
+        needs a human. Worth pinning because `Policy()` is the natural way to write
         an allow-nothing policy, and it does not do that.
+
+        The two refusals are different verdicts and that is the point: `DROP TABLE t`
+        is parsed and classified and simply has no rule (REVIEW), while
+        `Totally not SQL` never becomes a statement at all (UNKNOWN).
         """
         policy = Policy(name="empty")
         assert screen(sql_call("select 1"), policy, spec=spec_key).verdict is \
             Verdict.ALLOW
         assert screen(sql_call("DROP TABLE t"), policy, spec=spec_key).verdict is \
-            Verdict.UNKNOWN
+            Verdict.REVIEW
         assert screen(sql_call("Totally not SQL"), policy, spec=spec_key).verdict \
             is Verdict.UNKNOWN
 

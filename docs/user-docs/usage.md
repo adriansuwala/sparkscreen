@@ -11,18 +11,42 @@ pip install sparkscreen
 
 No JVM. The Spark SQL parsers are built into the wheel. Python 3.10+.
 
-## The three verdicts
+## The four verdicts
 
 | verdict | meaning | exit code |
 |---|---|---|
 | `ALLOW` | we resolved the SQL, parsed it with Spark's grammar, and no policy objected | 0 |
 | `DENY` | …and a deny rule matched | 1 |
-| `UNKNOWN` | we could not determine — unresolvable SQL, unparseable SQL, an unsupported construct, a resource limit | 2 |
+| `REVIEW` | we analysed it and a person should decide | 2 |
+| `UNKNOWN` | we could not analyse it | 2 |
 
 `UNKNOWN` is the point rather than a cop-out. A screener that reports "no issues" on code
 it could not analyse is a false assurance with a confident voice, which is how a dangerous
 tool gets trusted. So every internal failure lands on `UNKNOWN`, and a gate should treat
 any non-zero exit as "do not execute without review".
+
+### `REVIEW` and `UNKNOWN` are different, on purpose
+
+Both mean "a human is needed", and they need different humans. `UNKNOWN` is screener
+health — the tool could not do its job, and the fix is a better screener or a smaller
+input. `REVIEW` is operator workload — the tool did its job and reached a defensible
+conclusion, and the fix is a policy decision. A dashboard that conflates them either
+pages someone about a parser bug or hides a genuine review behind it.
+
+| | `REVIEW` | `UNKNOWN` |
+|---|---|---|
+| the statement was parsed | yes | no |
+| labels and targets are known | yes | no |
+| what the screener could not do | lacked a *policy opinion* | lacked *analysis* |
+
+So `DELETE FROM t WHERE id = 3` is `REVIEW` — parsed, classified, deliberately routed to
+a human — while `spark.sql(f"drop table {x}")` with an unresolved `x` is `UNKNOWN`, because
+no statement exists to rule on. `drop table secret.salaries` outside your
+`readable_namespaces` is `REVIEW`: the check ran and returned "not permitted".
+
+`REVIEW` and `UNKNOWN` share exit code 2. The exit status is the tool's binary gate —
+safe to run, or a human looks at it. Which of the two it was is in the `verdict` field,
+not the exit code.
 
 ## Command line
 
@@ -39,7 +63,7 @@ Example:
 
 ```
 $ sparkscreen etl.py
-DENY: 1 deny, 0 unknown, 0 allow
+DENY: 1 deny, 0 unknown, 0 review, 0 allow
 
   DENY    line 14: overwrites existing data (INSERT OVERWRITE / REPLACE)
           reason=destructive_statement severity=critical
@@ -57,9 +81,9 @@ from sparkscreen import screen, load_policy, read_only_policy, Verdict
 report = screen(source_code, policy=None, spec="spark-4.0")
 
 report.ok         # True only when verdict is ALLOW with no unknowns
-report.verdict    # Verdict.ALLOW / DENY / UNKNOWN
+report.verdict    # Verdict.ALLOW / DENY / REVIEW / UNKNOWN
 report.findings   # per-statement detail
-report.summary()  # "DENY: 1 deny, 0 unknown, 0 allow"
+report.summary()  # "DENY: 1 deny, 0 unknown, 0 review, 0 allow"
 
 for f in report.findings:
     print(f.verdict, f.reason, f.statement, f.targets, f.line)
@@ -244,7 +268,7 @@ find out whether the new grammar behaves the way you assumed.
 `report.analysis_failures` separates "we could not look" from "we looked and it is outside
 policy" — useful if you are tuning how noisy your gate is.
 
-**Seeing `UNKNOWN` on `DELETE`/`UPDATE`/`MERGE`.** Correct and intentional, and the
+**Seeing `REVIEW` on `DELETE`/`UPDATE`/`MERGE`.** Correct and intentional, and the
 `WHERE` clause does not exempt them. Any statement that removes rows carries
 `DESTROY_DATA` and needs a human, whether it removes one record or a million.
 

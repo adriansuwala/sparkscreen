@@ -7,7 +7,7 @@ the tool worse than useless.
 import pytest
 
 from sparkscreen import Reason, screen, Verdict
-from sparkscreen.model import Finding, Report, UNKNOWN_REASONS
+from sparkscreen.model import Finding, Report, ANALYSIS_FAILURE_REASONS
 
 #: Verdict/reason pairs that are legal but were historically mishandled. `verdict` and
 #: `reason` are independent axes: a rule may be UNKNOWN with a non-UNKNOWN reason, and a
@@ -32,7 +32,7 @@ def _finding(verdict, reason):
 def test_aggregation_follows_verdict_not_reason(verdict, reason):
     """A single finding's verdict must drive the report verdict.
 
-    Regression test. `Report.verdict` used to test `f.reason in UNKNOWN_REASONS`
+    Regression test. `Report.verdict` used to test `f.reason in ANALYSIS_FAILURE_REASONS`
     instead of `f.verdict is UNKNOWN`, so a policy rule of
     `verdict=UNKNOWN, reason=DESTRUCTIVE_STATEMENT` aggregated to ALLOW. The rules
     carrying DELETE/UPDATE/MERGE/INSERT are exactly that shape, so every one of them
@@ -44,11 +44,26 @@ def test_aggregation_follows_verdict_not_reason(verdict, reason):
 
 
 @pytest.mark.parametrize("verdict,reason", PAIRS)
-def test_analysis_failure_classification_is_independent(verdict, reason):
-    """`is_analysis_failure` classifies; it must not influence the verdict."""
+def test_analysis_failure_and_review_track_the_verdict(verdict, reason):
+    """Both classifications follow the verdict, never the reason.
+
+    This used to assert `is_analysis_failure is (reason in ANALYSIS_FAILURE_REASONS)` -- i.e.
+    that the two were computed from *different* axes, which was true when the verdict
+    scale could not express the distinction. It cannot any more, and asserting they
+    disagree would now be asserting a bug: the whole point of the REVIEW/UNKNOWN split
+    is that the verdict carries the distinction, so a reason-keyed test would contradict
+    it for exactly the cases that motivated the split.
+
+    `UNSUPPORTED_STATEMENT` is the case that proves it. It reads like a failure and
+    used to be classified as one, but we parse the statement and know its label and
+    targets -- we only lack a policy rule. That is a review.
+    """
     finding = _finding(verdict, reason)
-    assert finding.is_analysis_failure is (reason in UNKNOWN_REASONS)
+    assert finding.is_analysis_failure is (verdict is Verdict.UNKNOWN)
     assert finding.is_unknown is (verdict is Verdict.UNKNOWN)
+    assert finding.needs_review is (verdict is Verdict.REVIEW)
+    # A REVIEW must never also read as a failure, or a dashboard double-counts it.
+    assert not (finding.is_analysis_failure and finding.needs_review)
 
 
 def test_deny_outranks_unknown():
@@ -120,7 +135,13 @@ def test_never_allows_dangerous_or_unanalyzable(spec_key, source):
         f"{source!r} was allowed under {spec_key}: "
         f"{[f.to_dict() for f in report.findings]}"
     )
-    assert report.verdict in (Verdict.DENY, Verdict.UNKNOWN)
+    # All three refusing verdicts. ALLOW is the only thing that must never appear
+    # here, and the explicit list is the point: adding a fifth verdict later has to
+    # update this line deliberately rather than slip past it.
+    assert report.verdict in (Verdict.DENY, Verdict.UNKNOWN, Verdict.REVIEW), (
+        f"{source!r} came back {report.verdict.value!r}, which is neither a refusal "
+        f"nor an examination"
+    )
 
 
 @pytest.mark.parametrize("source", MUST_NOT_ALLOW)
@@ -192,8 +213,10 @@ def test_both_allowlists_apply_independently():
         name="both", rules=base.rules,
         writable_namespaces=("staging.*",), readable_namespaces=("prod.*",),
     )
+    # REVIEW, not UNKNOWN: the allowlist check ran and came back negative. The
+    # statement was analysed perfectly well; it simply is not permitted.
     writable_but_unreadable = screen('spark.sql("DROP TABLE staging.x")', policy)
-    assert writable_but_unreadable.verdict is Verdict.UNKNOWN
+    assert writable_but_unreadable.verdict is Verdict.REVIEW
     assert any(f.reason is Reason.OUTSIDE_ALLOWLIST
                for f in writable_but_unreadable.findings)
 
@@ -201,25 +224,27 @@ def test_both_allowlists_apply_independently():
     assert fully_allowed.verdict is Verdict.ALLOW
 
     fully_denied = screen('spark.sql("SELECT * FROM other.x")', policy)
-    assert fully_denied.verdict is Verdict.UNKNOWN
+    assert fully_denied.verdict is Verdict.REVIEW
 
 
 def test_outside_allowlist_is_a_review_not_an_analysis_failure():
     """OUTSIDE_ALLOWLIST means "we looked and it's outside policy", not "we couldn't look".
 
-    It carries an UNKNOWN verdict -- a human should look -- but it must stay out of
-    UNKNOWN_REASONS so `Report.analysis_failures` can distinguish the two. This split is
-    what lets a dashboard say "we couldn't analyse N snippets" separately from "N
-    statements were outside policy".
+    This used to be a subtle assertion: the verdict was UNKNOWN and the reason was
+    carefully kept out of ANALYSIS_FAILURE_REASONS so a dashboard could still tell the two
+    apart. The split verdict scale states it directly -- the verdict IS REVIEW, which
+    is a different value on the axis a dashboard already reads. The reason set is kept
+    as a second, independent route to the same fact.
     """
     from sparkscreen.policy import Policy, default_policy
 
     base = default_policy()
     policy = Policy(name="r", rules=base.rules, readable_namespaces=("prod.*",))
     report = screen('spark.sql("SELECT * FROM secret.s")', policy)
-    assert report.verdict is Verdict.UNKNOWN
-    assert Reason.OUTSIDE_ALLOWLIST not in UNKNOWN_REASONS
+    assert report.verdict is Verdict.REVIEW
+    assert Reason.OUTSIDE_ALLOWLIST not in ANALYSIS_FAILURE_REASONS
     assert not report.analysis_failures
+    assert report.findings[0].needs_review
 
 
 def test_empty_policy_is_not_allow_everything():
@@ -233,7 +258,8 @@ def test_empty_policy_is_not_allow_everything():
     from sparkscreen.policy import Policy
 
     assert screen("spark.sql('select 1')", Policy()).ok
-    # ...but nothing destructive slips through it.
-    assert screen("spark.sql('drop table t')", Policy()).verdict is Verdict.UNKNOWN
+    # ...but nothing destructive slips through it. REVIEW, because the statement was
+    # analysed and classified; what the empty policy lacks is an opinion about it.
+    assert screen("spark.sql('drop table t')", Policy()).verdict is Verdict.REVIEW
     assert screen("spark.sql('insert overwrite table t select 1')", Policy()).verdict \
-        is Verdict.UNKNOWN
+        is Verdict.REVIEW

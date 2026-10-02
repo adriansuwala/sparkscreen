@@ -14,7 +14,7 @@ import sys
 
 from sparkscreen import Effect, Verdict, read_only_policy, screen
 from sparkscreen.model import Reason
-from sparkscreen.policy import Limits, Policy
+from sparkscreen.policy import Limits, Policy, default_policy
 
 failures: list[str] = []
 
@@ -35,6 +35,30 @@ def main() -> int:
     check("dynamic SQL -> UNKNOWN",
           screen("spark.sql(q)").verdict, Verdict.UNKNOWN)
 
+    # --- the four-value scale, row for row against usage.md ---
+    # The REVIEW/UNKNOWN split is the claim most likely to rot, because it is a
+    # distinction in prose ("we analysed it" vs "we could not") that only the code
+    # can actually settle. Every row of the doc's comparison table is checked here.
+    check("REVIEW and UNKNOWN are distinct members",
+          Verdict.REVIEW is Verdict.UNKNOWN, False)
+    check("DELETE -> REVIEW (parsed, needs a human)",
+          screen("spark.sql('delete from t where id = 3')").verdict, Verdict.REVIEW)
+    check("unresolved SQL -> UNKNOWN (not REVIEW)",
+          screen("tbl = input()\nspark.sql(f'drop table {tbl}')\n").verdict,
+          Verdict.UNKNOWN)
+    check("unparseable SQL -> UNKNOWN",
+          screen("spark.sql('SELCT 1')").verdict, Verdict.UNKNOWN)
+    check("read outside readable_namespaces -> REVIEW",
+          screen("spark.sql('select * from secret.s')",
+                 Policy(name="r", rules=default_policy().rules,
+                        readable_namespaces=("prod.*",))).verdict,
+          Verdict.REVIEW)
+    check("summary counts reviews as their own column",
+          screen("spark.sql('delete from t where id = 3')").summary(),
+          "REVIEW: 0 deny, 0 unknown, 1 review, 0 allow")
+    check("a REVIEW is not an analysis failure",
+          screen("spark.sql('delete from t where id = 3')").analysis_failures, [])
+
     # --- library API surface ---
     report = screen("spark.sql('DROP TABLE prod.t')")
     check("report.ok is False on DENY", report.ok, False)
@@ -44,7 +68,7 @@ def main() -> int:
     check("finding.targets", finding.targets, ("prod.t",))
     check("finding.severity", finding.severity.value, "critical")
     check("summary() shape", report.summary(),
-          "DENY: 1 deny, 0 unknown, 0 allow")
+          "DENY: 1 deny, 0 unknown, 0 review, 0 allow")
 
     # The strictness claim in usage.md: one unanalysable sink poisons report.ok.
     mixed = screen("spark.sql('select 1')\nspark.sql(q)")
@@ -83,16 +107,16 @@ def main() -> int:
           screen('df.write.mode("append").saveAsTable("staging.t")', staging).verdict,
           Verdict.ALLOW)
     check("df bare saveAsTable prod -> REVIEW",
-          screen('df.write.saveAsTable("prod.t")').verdict, Verdict.UNKNOWN)
+          screen('df.write.saveAsTable("prod.t")').verdict, Verdict.REVIEW)
     check("df unreadable mode -> REVIEW",
           screen('df.write.mode(some_var).saveAsTable("prod.t")').verdict,
-          Verdict.UNKNOWN)
+          Verdict.REVIEW)
 
     # "an unknown table name does not hide an overwrite"
     unknown = screen('df.write.mode("overwrite").saveAsTable(some_name)')
     check("unknown target still DESTROY_DATA",
           Effect.DESTROY_DATA in unknown.effects, True)
-    check("unknown target is REVIEW", unknown.verdict, Verdict.UNKNOWN)
+    check("unknown target is REVIEW", unknown.verdict, Verdict.REVIEW)
 
     # --- the effect axis table in usage.md ---
     def eff(sql: str):

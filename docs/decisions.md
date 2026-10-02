@@ -284,6 +284,49 @@ cannot name a test that emits a value, it does not belong in the enum.
 
 ## D17 — keep the over-approximation when the false positive is cheaper
 
+
+## D18 — split UNKNOWN into REVIEW and UNKNOWN; the exit code stays binary
+
+**Decision.** `Verdict` gains a fourth member. `REVIEW` means *we analysed it and a person
+should decide*; `UNKNOWN` means *we could not analyse it*. Both exit 2.
+
+**Why.** The old three-value scale collapsed two genuinely different failures into one
+word. `SELECT * FROM secret.salaries` outside `readable_namespaces` and
+`spark.sql(q)` with an unbound `q` both reported UNKNOWN, and both exited 2, and both
+mean "do not run this". But they are not the same event. One is the screener saying "I
+did my job and the answer is no"; the other is the screener saying "I could not do my
+job". A team triaging that queue has two different remedies — write a policy rule, or fix
+the tool — and one number cannot tell them apart.
+
+The old code did carry the distinction, but sideways and unreliably: it was in
+`is_analysis_failure`, a *reason*-keyed property that had to be kept in sync with a
+*verdict*-keyed enum by hand. `UNSUPPORTED_STATEMENT` was the tell — it reads like a
+failure, and it was classified as one, even though the statement was parsed perfectly well
+and all we lacked was an opinion.
+
+**Why the exit code does not split.** A CI gate wants one bit. Any non-zero exit already
+means "a human looks at this". Making `REVIEW` exit 3 would force every consumer to
+update its threshold for information it was not using, and the first consumer that
+mapped `!= 0` to a single error page would silently conflate them again. The richness
+belongs in the `verdict` field, which every consumer already parses.
+
+**Consequences accepted.**
+
+- It is a breaking API change. `Verdict` has four members now, and consumers that
+  exhaustively switch on it will notice. That is the point — the old switch could not
+  distinguish two states that are now distinguishable.
+- `UNKNOWN_REASONS` is renamed `ANALYSIS_FAILURE_REASONS` and loses
+  `UNSUPPORTED_STATEMENT`. The name had to change; it was lying.
+- `is_analysis_failure` is now defined as `verdict is UNKNOWN`. The old test asserted it
+  was computed from the reason *independently* of the verdict. That test was asserting
+  the defect. It is replaced by one asserting the two agree, and that a REVIEW carrying
+  an analysis-failure-looking reason is not a failure.
+- `_combine()` had to be reordered. It preferred the UNKNOWN finding as primary, so once
+  the allowlist began emitting REVIEW it stopped matching and a plain DENY became primary,
+  silently dropping `OUTSIDE_ALLOWLIST` from the report. It now prefers by attention
+  needed rather than by one specific verdict, which makes that class of regression
+  structural rather than incidental.
+
 **Accepted** (`sparkscreen-r50`, 2026-10-02).
 
 `LOAD DATA INPATH` and `LOAD DATA LOCAL INPATH` share the `LoadData` label, so

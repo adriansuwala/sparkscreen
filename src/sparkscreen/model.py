@@ -22,8 +22,35 @@ from typing import Any, Iterable
 
 
 class Verdict(str, Enum):
+    """The decision, on a four-value scale.
+
+    The split between REVIEW and UNKNOWN is the whole point of the scale, and it exists
+    because the old two-value-plus-one version could not answer "is the agent
+    misbehaving, or is the screener failing?". Both of those used to be UNKNOWN.
+
+      ALLOW    we resolved it, parsed it, and policy did not object
+      DENY     policy has a rule that forbids it
+      REVIEW   we know exactly what it does, and a person should decide. The screener
+               worked. DELETE from prod, a write outside the allowlist, a statement
+               type this policy has no rule for.
+      UNKNOWN  we could not determine. The screener failed. Unparseable SQL, a string
+               we could not fold, a resource limit, a Python syntax error.
+
+    Both REVIEW and UNKNOWN are refusals to proceed -- neither is a quiet pass -- so the
+    fail-closed property is unchanged. What changed is that a dashboard can now separate
+    "the agent wanted something questionable" from "we have a bug", which is the
+    difference between filing a finding against the agent and filing one against this
+    tool.
+
+    Ranking for aggregation is DENY > UNKNOWN > REVIEW > ALLOW. UNKNOWN outranks REVIEW
+    because a report containing something we could not look at is the more urgent of
+    the two: an unexamined statement is an unknown risk, whereas a REVIEW has been
+    looked at and is waiting on a decision. Both still gate identically.
+    """
+
     ALLOW = "allow"
     DENY = "deny"
+    REVIEW = "review"
     UNKNOWN = "unknown"
 
 
@@ -159,14 +186,30 @@ class Reason(str, Enum):
 #: UNKNOWN (a human should look) but is not an analysis failure (we did the analysis).
 #: Keeping OUTSIDE_ALLOWLIST out of this set is what lets a dashboard say "we couldn't
 #: look" separately from "we looked, and it's outside policy".
-UNKNOWN_REASONS = frozenset({
+#: Reasons that mean *the screener could not analyse this*, as opposed to a reason that
+#: means *it analysed it and a person should decide*.
+#:
+#: This used to double as "the reasons that produce Verdict.UNKNOWN", which conflated
+#: the two and made the distinction unavailable to any consumer. With the four-value
+#: verdict scale the distinction is carried by the verdict itself, and this set is the
+#: definition of UNKNOWN rather than a proxy for it.
+#:
+#: `UNSUPPORTED_STATEMENT` was here and is deliberately not any more. We parsed it, we
+#: know the label and the targets; what we lack is a policy rule. That is a review, not a
+#: blind spot, and calling it a failure made every unfamiliar-but-benign statement look
+#: like a tool bug.
+ANALYSIS_FAILURE_REASONS = frozenset({
     Reason.UNPARSEABLE_SQL,
     Reason.UNRESOLVED_DYNAMIC_SQL,
-    Reason.UNSUPPORTED_STATEMENT,
     Reason.RESOURCE_LIMIT,
     Reason.UNSUPPORTED_SPARK_VERSION,
     Reason.ANALYSIS_ERROR,
 })
+
+#: Backwards-compatible alias. The name is now a slight misnomer -- it means "analysis
+#: failure", not "every UNKNOWN verdict" -- but keeping it avoids breaking an import for
+#: no benefit. Prefer `ANALYSIS_FAILURE_REASONS`.
+UNKNOWN_REASONS = ANALYSIS_FAILURE_REASONS
 
 
 class Severity(str, Enum):
@@ -240,13 +283,29 @@ class Finding:
 
     @property
     def is_analysis_failure(self) -> bool:
-        """True when the reason says analysis could not complete (vs. a review verdict).
+        """True when *the screener could not analyse this*, as opposed to a review.
 
-        This is a *classification* for reporting and filtering -- "we couldn't look" as
-        opposed to "we looked and a human should decide" -- and is never used to compute
-        a verdict. Use `is_unknown` for that.
+        Now equivalent to `is_unknown`, because that distinction moved from the reason
+        axis onto the verdict axis. It is kept as a separate name because it says what
+        the thing *is* rather than what it is called, and because `analysis_failures` on
+        the report is the dashboard-facing form of it.
+
+        The check is on the verdict, never on the reason. Deriving it from
+        `reason in ANALYSIS_FAILURE_REASONS` would reintroduce exactly the bug that
+        made DELETE/MERGE/INSERT report as ALLOW: those carry
+        `verdict=REVIEW, reason=DESTRUCTIVE_STATEMENT`, and a reason-keyed test would
+        read them as failures.
         """
-        return self.reason in UNKNOWN_REASONS
+        return self.verdict is Verdict.UNKNOWN
+
+    @property
+    def needs_review(self) -> bool:
+        """True for a REVIEW finding: we know what it does, and a person must decide.
+
+        Distinct from `is_analysis_failure` because the two call for different responses
+        -- one is a finding against the code, the other is a finding against the tool.
+        """
+        return self.verdict is Verdict.REVIEW
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -281,21 +340,25 @@ class Report:
 
     @property
     def verdict(self) -> Verdict:
-        """Worst verdict present. DENY outranks UNKNOWN outranks ALLOW.
+        """Worst verdict present: DENY > UNKNOWN > REVIEW > ALLOW.
 
         Aggregated on each finding's *verdict*, never on its reason. The reason is
         metadata for a human reader; the verdict is the decision. Deriving one from the
         other is how DELETE/MERGE/INSERT silently became ALLOW -- the rules that carry
-        them are `verdict=UNKNOWN, reason=DESTRUCTIVE_STATEMENT`, and the old code asked
+        them are `verdict=REVIEW, reason=DESTRUCTIVE_STATEMENT`, and the old code asked
         whether the reason was in UNKNOWN_REASONS.
 
-        UNKNOWN outranks ALLOW deliberately: a report containing one unanalyzable sink
-        cannot be summarised as "allowed", because we do not actually know.
+        Neither UNKNOWN nor REVIEW may be summarised as "allowed", and the ordering
+        between them says which to mention first. UNKNOWN outranks REVIEW because a
+        statement nobody examined is a larger unknown than one that was examined and is
+        waiting on a decision.
         """
         if any(f.verdict is Verdict.DENY for f in self.findings):
             return Verdict.DENY
-        if any(f.is_unknown for f in self.findings):
+        if any(f.verdict is Verdict.UNKNOWN for f in self.findings):
             return Verdict.UNKNOWN
+        if any(f.verdict is Verdict.REVIEW for f in self.findings):
+            return Verdict.REVIEW
         return Verdict.ALLOW
 
     @property
@@ -310,6 +373,9 @@ class Report:
     @property
     def ok(self) -> bool:
         """True only when the verdict is ALLOW with no unknowns."""
+        # Strict, and deliberately stricter than "no DENY": REVIEW and UNKNOWN both
+        # mean this was not cleared. An absent REVIEW in the enum would be caught here,
+        # since anything that is not ALLOW returns False.
         return self.verdict is Verdict.ALLOW
 
     @property
@@ -353,6 +419,7 @@ class Report:
             f"{self.verdict.value.upper()}: "
             f"{counts[Verdict.DENY]} deny, "
             f"{counts[Verdict.UNKNOWN]} unknown, "
+            f"{counts[Verdict.REVIEW]} review, "
             f"{counts[Verdict.ALLOW]} allow"
         )
 

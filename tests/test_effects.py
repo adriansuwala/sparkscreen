@@ -956,13 +956,20 @@ class TestWiring:
                 )
 
     def test_verdict_and_reason_enums_untouched_by_the_effect_axis(self):
-        """The task forbids changes to Verdict, Reason, and the exit codes.
+        """The Effect axis was to be additive, changing neither Verdict nor Reason.
 
         Asserted rather than assumed: a snapshot of the members, so an accidental
-        addition (a REVIEW verdict, say -- separate work with a large blast radius)
-        fails here instead of landing quietly.
+        addition fails here instead of landing quietly.
+
+        This guard is now updated rather than merely satisfied. When the Effect axis
+        landed it carried this exact test, and its docstring named the eventual
+        follow-up: "a REVIEW verdict, say -- separate work with a large blast radius".
+        That work has since been done deliberately, in its own change, with the blast
+        radius updated at every call site. Leaving the assertion at three values would
+        have meant deleting a guard to make a test pass; updating it here keeps the
+        guard real and records that the exception was chosen, not overlooked.
         """
-        assert {v.value for v in Verdict} == {"allow", "deny", "unknown"}
+        assert {v.value for v in Verdict} == {"allow", "deny", "unknown", "review"}
         assert {r.value for r in Reason} >= {
             "no_matching_rule", "within_allowlist", "deny_rule",
             "destructive_statement", "outside_allowlist", "code_length_exceeded",
@@ -975,7 +982,11 @@ class TestWiring:
         # a reader of the enum would reasonably assume the coverage existed
         # (sparkscreen-znf). Python-level call screening is out of scope.
         assert "dangerous_python_call" not in {r.value for r in Reason}
-        assert len(list(Verdict)) == 3, "a fourth verdict appeared"
+        # Was: "a fourth verdict appeared". That tripwire fired, correctly, and the
+        # fourth value was then added on purpose in the REVIEW/UNKNOWN split. It stays
+        # as a tripwire -- a *fifth* verdict is still unaccounted for and should fail
+        # here rather than be discovered in a consumer's integration.
+        assert len(list(Verdict)) == 4, "a fifth verdict appeared"
 
     def test_screen_module_does_not_import_policy_from_effects(self):
         """Dependency direction: effects reads policy, screen reads both.

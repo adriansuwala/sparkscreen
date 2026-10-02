@@ -223,6 +223,42 @@ would have returned a path that could never import.
 
 ---
 
+
+## F13 — the two-value verdict scale had no way to say "I did my job"
+
+**Severity.** Structural. Found while implementing the REVIEW/UNKNOWN split, and it was
+already costing accuracy before any REVIEW existed.
+
+**What happened.** `UNSUPPORTED_STATEMENT` was a member of `UNKNOWN_REASONS`, so any
+report containing it incremented `Report.analysis_failures` and was counted as "the
+screener could not analyse this". But `UNSUPPORTED_STATEMENT` is raised when a statement
+*parsed cleanly*, its label resolved, its targets were extracted — and then no rule in
+the policy matched. Every fact needed to make a decision was in hand. The only thing
+missing was an opinion.
+
+The consequence is that the two counters a dashboard would naturally show were both wrong
+for this case: the analysis-failure rate was inflated by ordinary policy gaps, and the
+verdict read UNKNOWN, which reads as "I could not tell" rather than "I can tell, and you
+may want an opinion".
+
+**The worse half.** `OUTSIDE_ALLOWLIST` had the same shape and was handled by *omission* —
+it was simply left out of the set, with a comment explaining that it had to stay out.
+A correct classification maintained by remembering not to classify something, in a set
+whose membership nothing tests. `tests/test_verdicts.py` did pin it, but the pin asserted
+the *absence* from a set rather than the *presence* of the right answer.
+
+**Fix.** The verdict scale now carries the distinction directly. `UNSUPPORTED_STATEMENT`
+and `OUTSIDE_ALLOWLIST` are both REVIEW; the set that drives `analysis_failures` holds
+only reasons where analysis genuinely did not happen. The rule is stated in one place and
+tested as a property of the scale, so a future reason cannot drift into the wrong set
+without failing a test whose name says so.
+
+**The general lesson.** Both bugs are the same shape, and it is a shape worth watching for
+in this codebase specifically: *a classification held correct by an exception rather than
+by a rule.* The `elif` bug in the namespace allowlists (F8) was the third instance. If a
+correctness property is expressed as "this case is absent from the set", it is one new
+case away from being wrong, and nothing will complain until the case exists.
+
 ## Where the test suite was wrong
 
 Marked separately because these are the ones where the code was right and the
@@ -264,6 +300,16 @@ member that is never emitted makes the tool look more capable than it is.
 ---
 
 ## Process lessons
+
+**A correctness property held by an exception is not held.** Three bugs in this
+repository — F8 (`elif` between the two allowlist checks), F13's
+`OUTSIDE_ALLOWLIST` (correct only by being left out of a set, with a comment saying it
+had to stay out), and F9 (`EXECUTE IMMEDIATE` not being under direct parser children) —
+are the same shape: the behaviour was right for the cases anyone had thought of, and
+wrong for the next one, with nothing to say so. When a property is "this case is absent
+from the set" or "this case happens to be a direct child", prefer expressing it as a rule
+over the whole domain, and test the property by its name rather than by its example.
+
 
 Worth more than any individual bug, since they are what would have prevented the above:
 

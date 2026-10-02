@@ -205,7 +205,7 @@ def _eval_write(policy: Policy, write: DataFrameWrite) -> Finding:
     # effect is already known, so this is a review trigger rather than a blind spot.
     if not write.target_known:
         finding = Finding(
-            verdict=Verdict.UNKNOWN,
+            verdict=Verdict.REVIEW,
             reason=Reason.UNRESOLVED_DYNAMIC_SQL,
             message=f"{where} writes to a destination we cannot resolve, so its "
                     f"namespace was not checked; effect is still known",
@@ -261,7 +261,7 @@ def _eval_write(policy: Policy, write: DataFrameWrite) -> Finding:
                     )
         if notes:
             finding = Finding(
-                verdict=Verdict.UNKNOWN,
+                verdict=Verdict.REVIEW,
                 reason=Reason.OUTSIDE_ALLOWLIST,
                 message=f"{where} writes data outside the permitted namespaces: "
                         + "; ".join(notes),
@@ -283,9 +283,15 @@ def _eval_write(policy: Policy, write: DataFrameWrite) -> Finding:
 
     # An unreadable mode is the one thing that can turn a benign append into an
     # unexamined overwrite, so it is checked last and overrides a permissive verdict.
+    #
+    # REVIEW rather than UNKNOWN. The analysis succeeded: we found the write, we know
+    # the effect, we know it is not an append. What we cannot do is rule out `overwrite`,
+    # and "we cannot rule that out, so a person should decide" is precisely what REVIEW
+    # means. Reporting UNKNOWN here would tell a dashboard the tool had failed, and it
+    # had not -- it had correctly identified a decision that is not its to make.
     if not write.mode_known:
         finding = Finding(
-            verdict=Verdict.UNKNOWN,
+            verdict=Verdict.REVIEW,
             reason=Reason.UNRESOLVED_DYNAMIC_SQL,
             message=f"{where} sets a save mode we cannot read; it may be an overwrite, "
                     f"so it needs review",
@@ -314,7 +320,7 @@ def _eval_one(
     # main verdict, so keep them all but ensure at least one exists
     if not findings:
         findings = [Finding(
-            verdict=Verdict.UNKNOWN,
+            verdict=Verdict.REVIEW,
             reason=Reason.UNSUPPORTED_STATEMENT,
             message=f"no policy decision produced for {label}",
             line=line, sql=sql, statement=label,
@@ -338,13 +344,34 @@ def _eval_one(
 
 
 def _combine(findings: list[Finding]) -> Finding:
-    """Fold allowlist notes into the primary finding without losing information."""
-    from .model import UNKNOWN_REASONS
+    """Fold allowlist notes into the primary finding without losing information.
 
-    if any(f.is_unknown for f in findings):
-        primary = next(f for f in findings if f.is_unknown)
+    `Policy.evaluate_statement` returns the rule's own verdict plus any allowlist
+    objections. The report shows one finding per statement, so one has to be primary.
+
+    The primary is the one carrying the most *information*, which is why this is not
+    simply "the first" or "the last". A rule match says "deny.drop matched: it drops or
+    truncates". An allowlist objection says "staging.x is outside the readable
+    namespaces" -- which is the part a human needs and the rule verdict does not convey.
+    So a REVIEW or UNKNOWN finding is preferred over a plain DENY, and the rest are
+    appended to its message rather than discarded.
+
+    This got subtly wrong when REVIEW was split out from UNKNOWN: the old code looked
+    for `is_unknown`, so once the allowlist started emitting REVIEW it stopped matching
+    and a DENY became primary, silently dropping the allowlist reason from the report.
+    Preference by *attention needed* rather than by one specific verdict avoids that
+    class of regression.
+    """
+    from .model import UNKNOWN_REASONS  # noqa: F401  (kept for the vocabulary)
+
+    for wanted in (Verdict.UNKNOWN, Verdict.REVIEW):
+        match = next((f for f in findings if f.verdict is wanted), None)
+        if match is not None:
+            primary = match
+            break
     else:
         primary = findings[-1]
+
     extra = [f for f in findings if f is not primary]
     if extra:
         details = "; ".join(f.message for f in extra)

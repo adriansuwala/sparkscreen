@@ -228,21 +228,34 @@ class TestVerdicts:
         assert r.verdict is Verdict.DENY
         assert Effect.DESTROY_DATA in r.effects
 
-    def test_unknown_mode_is_unknown_never_allow(self):
-        """The one degradation in the design, and it degrades closed.
+    def test_unknown_mode_is_reviewed_never_allowed(self):
+        """The one degradation in the design, and it degrades to a human.
 
         A runtime mode could be an overwrite, so the write cannot be certified safe.
-        Note that the *effect* is still WRITE_DATA -- we know it writes -- but the
-        verdict is UNKNOWN because the mode is what decides whether it destroys.
+        The *effect* is still WRITE_DATA -- we know it writes -- but the mode is what
+        decides whether it destroys, so the verdict is REVIEW.
+
+        REVIEW rather than UNKNOWN, and this is the case the distinction exists for.
+        UNKNOWN means the screener could not analyse something; here it analysed the
+        call perfectly well and reached a well-founded "this depends on a value I
+        cannot see". Those need different dashboards: one is screener health, the other
+        is operator workload.
         """
         r = screen('df.write.mode(m).saveAsTable("prod.t")')
-        assert r.verdict is Verdict.UNKNOWN, "an unreadable mode must not be ALLOW"
+        assert r.verdict is Verdict.REVIEW, "an unreadable mode must not be ALLOW"
         assert Effect.WRITE_DATA in r.effects
         assert Effect.DESTROY_DATA not in r.effects
 
-    def test_unknown_target_with_overwrite_is_unknown_but_carries_destroY(self):
+    def test_unknown_target_with_overwrite_is_reviewed_but_carries_destroy(self):
+        """The strongest form of the effect/verdict separation.
+
+        The destination is a runtime value, so the namespace check could not run. But
+        `mode("overwrite")` is a literal, so DESTROY_DATA is known with certainty.
+        The verdict is REVIEW because the namespace is uncheckable, not because the
+        damage is unknown.
+        """
         r = screen('df.write.mode("overwrite").saveAsTable(name)')
-        assert r.verdict is Verdict.UNKNOWN, "no namespace could be checked"
+        assert r.verdict is Verdict.REVIEW, "no namespace could be checked"
         assert Effect.DESTROY_DATA in r.effects, "the effect is still knowable"
 
     def test_overwrite_is_denied_even_in_an_allowed_namespace(self):
@@ -269,7 +282,7 @@ class TestVerdicts:
 
         policy = Policy(writable_namespaces=("staging.*",), readable_namespaces=("staging.*",))
         r = screen('df.write.mode("append").saveAsTable("prod.t")', policy)
-        assert r.verdict is Verdict.UNKNOWN
+        assert r.verdict is Verdict.REVIEW
 
     def test_read_only_policy_does_not_allow_a_dataframe_write(self):
         """No allowlist configured is not permission to write.
@@ -277,12 +290,11 @@ class TestVerdicts:
         Caught by this test as a fail-open: with `writable_namespaces` empty the
         namespace check produced no objections and the append came back ALLOW with
         `WITHIN_ALLOWLIST` -- the tool certifying a write it had no evidence was safe.
-        The SQL path already returns UNKNOWN for a rule-less policy
-        (`UNSUPPORTED_STATEMENT`), so the DataFrame path now matches: an absent
-        allowlist is an absent answer, not a passing one.
+        The SQL path also refuses for a rule-less policy, so the DataFrame path now
+        matches: an absent allowlist is an absent answer, not a passing one.
         """
         r = screen('df.write.mode("append").saveAsTable("prod.t")', read_only_policy())
-        assert r.verdict is Verdict.UNKNOWN, (
+        assert r.verdict is Verdict.REVIEW, (
             "a policy with no writable_namespaces must not clear a DataFrame write"
         )
         assert r.findings and r.findings[0].verdict is not Verdict.ALLOW

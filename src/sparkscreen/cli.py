@@ -42,6 +42,9 @@ _COLORS = {
     Verdict.ALLOW: "\033[32m",
     Verdict.DENY: "\033[31m",
     Verdict.UNKNOWN: "\033[33m",
+    # Distinct from UNKNOWN's yellow so a reviewer can tell at a glance whether they
+    # are looking at an agent finding or a screener gap.
+    Verdict.REVIEW: "\033[36m",
 }
 _RESET = "\033[0m"
 
@@ -159,6 +162,11 @@ def main(argv: list[str] | None = None) -> int:
     return {
         Verdict.ALLOW: EXIT_ALLOW,
         Verdict.DENY: EXIT_DENY,
+        # REVIEW and UNKNOWN gate identically -- both refuse to proceed -- and share
+        # an exit code on purpose. A shell script must not be able to distinguish them
+        # and accidentally treat one as passable; the distinction is for consumers that
+        # read the JSON, where it costs nothing.
+        Verdict.REVIEW: EXIT_UNKNOWN,
         Verdict.UNKNOWN: EXIT_UNKNOWN,
     }[report.verdict]
 

@@ -482,12 +482,16 @@ def test_screen_never_raises_on_arbitrary_text(src):
 
 @given(st.lists(_PYSRC_SQL, min_size=1, max_size=6))
 def test_report_verdict_ranks_deny_above_unknown(statements):
-    """PROPERTY: DENY outranks UNKNOWN outranks ALLOW, whatever the mix.
+    """PROPERTY: DENY > UNKNOWN > REVIEW > ALLOW, whatever the mix.
 
     Guards the aggregation bug model.py documents: deriving the verdict from the
     *reason* rather than the *verdict* made DELETE and MERGE -- which are
-    `verdict=UNKNOWN, reason=DESTRUCTIVE_STATEMENT` -- report as ALLOW, so
+    `verdict=REVIEW, reason=DESTRUCTIVE_STATEMENT` -- report as ALLOW, so
     `DELETE FROM prod.users` was waved through.
+
+    The order is total and the middle two are deliberately close: UNKNOWN outranks
+    REVIEW because a file the screener could not read is the more urgent problem,
+    but both refuse.
     """
     source = "import pyspark\n" + "\n".join(statements)
     report = screen(source)
@@ -496,6 +500,8 @@ def test_report_verdict_ranks_deny_above_unknown(statements):
         assert report.verdict is Verdict.DENY
     elif Verdict.UNKNOWN in verdicts:
         assert report.verdict is Verdict.UNKNOWN
+    elif Verdict.REVIEW in verdicts:
+        assert report.verdict is Verdict.REVIEW
     else:
         assert report.verdict is Verdict.ALLOW
 

@@ -238,7 +238,7 @@ class Policy:
             # Not destructive, but we have no positive rule for it. This is the
             # fail-closed path for statements the policy has not been taught.
             return [Finding(
-                verdict=Verdict.UNKNOWN,
+                verdict=Verdict.REVIEW,
                 reason=Reason.UNSUPPORTED_STATEMENT,
                 message=f"statement type {label!r} has no policy rule; "
                         "needs human review",
@@ -270,7 +270,7 @@ class Policy:
             for t in targets:
                 if not any(t.matches(pat) for pat in self.writable_namespaces):
                     findings.append(Finding(
-                        verdict=Verdict.UNKNOWN,
+                        verdict=Verdict.REVIEW,
                         reason=Reason.OUTSIDE_ALLOWLIST,
                         message=f"{t.name} is outside the writable namespaces "
                                 f"{list(self.writable_namespaces)}; needs review",
@@ -282,7 +282,7 @@ class Policy:
             for t in targets:
                 if not any(t.matches(pat) for pat in self.readable_namespaces):
                     findings.append(Finding(
-                        verdict=Verdict.UNKNOWN,
+                        verdict=Verdict.REVIEW,
                         reason=Reason.OUTSIDE_ALLOWLIST,
                         message=f"{t.name} is outside the readable namespaces "
                                 f"{list(self.readable_namespaces)}; needs review",
@@ -405,7 +405,7 @@ def default_policy() -> Policy:
         ),
         Rule(
             id="review.config",
-            verdict=Verdict.UNKNOWN,
+            verdict=Verdict.REVIEW,
             reason=Reason.UNSUPPORTED_STATEMENT,
             message="changes Spark configuration or cache state; needs review",
             severity=Severity.MEDIUM,
@@ -417,7 +417,7 @@ def default_policy() -> Policy:
         ),
         Rule(
             id="review.row-mutation",
-            verdict=Verdict.UNKNOWN,
+            verdict=Verdict.REVIEW,
             reason=Reason.DESTRUCTIVE_STATEMENT,
             message="mutates rows in place (DELETE / UPDATE / MERGE / INSERT); "
                     "needs review to confirm the WHERE clause",
@@ -433,7 +433,7 @@ def default_policy() -> Policy:
         ),
         Rule(
             id="review.call",
-            verdict=Verdict.UNKNOWN,
+            verdict=Verdict.REVIEW,
             reason=Reason.UNSUPPORTED_STATEMENT,
             message="CALL may invoke a procedure with side effects; needs review",
             severity=Severity.MEDIUM,
@@ -441,7 +441,7 @@ def default_policy() -> Policy:
         ),
         Rule(
             id="review.structural-index",
-            verdict=Verdict.UNKNOWN,
+            verdict=Verdict.REVIEW,
             reason=Reason.DESTRUCTIVE_STATEMENT,
             message="creates or drops an index or session variable; needs review",
             severity=Severity.MEDIUM,
