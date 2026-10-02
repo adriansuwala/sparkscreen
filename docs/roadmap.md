@@ -5,6 +5,35 @@ optimistic in the way noted at the end — see [How to read these](#how-to-read-
 
 ---
 
+## Issue ledger
+
+`br` (beads) tracks the open work in this repository, in `./.beads/`. The database is
+gitignored by `br` itself; `issues.jsonl` is tracked, so the ledger travels with the
+repo.
+
+```bash
+br list          # everything open
+br ready         # unblocked, in priority order
+br show <id>     # full issue with discussion
+br create --title "..." --priority 0 --description-file notes.md
+br dep add <issue> <depends-on>   # "issue is blocked by depends-on"
+br dep tree <issue>
+br dep cycles
+```
+
+| id | | |
+|---|---|---|
+| `sparkscreen-rn6` | **P0** | Detect DataFrame write sinks (`saveAsTable`, `save`, `jdbc`) |
+| `sparkscreen-120` | P1 | Decision: should unbounded `DELETE`/`MERGE` carry `DESTROY_DATA`? |
+| `sparkscreen-r50` | P2 | Decision: `LOAD DATA` `READ_LOCAL_FS` over-approximation |
+| `sparkscreen-dhe` | P2 | Split `Verdict.UNKNOWN` into `REVIEW` vs `UNKNOWN` — blocked by `rn6` |
+| `sparkscreen-znf` | P3 | `dbutils` and dangerous Python call screening — scope decision first |
+
+Each issue carries its reasoning inline, so the "why" survives without needing
+`docs/roadmap.md` open alongside it.
+
+---
+
 ## Where we are
 
 `master` is green: **2,199 tests passing in ~15s**, 14 skipped, 8 xfailed (all documented
