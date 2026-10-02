@@ -167,6 +167,21 @@ DELETE is parsed fine, we just want a human to confirm the WHERE clause. Derivin
 verdict from the reason made DELETE/UPDATE/MERGE/INSERT aggregate as ALLOW. See the
 commit message on `f3c1f39`.
 
+## Documentation
+
+Written records of what this project decided and what it got wrong — the reasoning is
+most of the value, and it should survive past any one conversation.
+
+- [docs/findings](docs/findings.md) — every bug found, each with a live reproducer
+- [docs/decisions](docs/decisions.md) — numbered decisions and what the alternatives cost
+- [docs/threads](docs/threads.md) — open questions, feasibility notes, musings
+- [docs/roadmap](docs/roadmap.md) — current state and what is next
+- [CONTRIBUTING](CONTRIBUTING.md) — branch policy and the three corpus-writing lessons
+
+`docs/findings.md` is the one to read first if you are deciding whether to trust this
+tool. Almost every bug found here was a **fail-open** — the screener reported ALLOW,
+reported nothing, or reported something confident and wrong, and none of them crashed.
+
 ## Known limitations
 
 These are real, and mostly fail closed.
