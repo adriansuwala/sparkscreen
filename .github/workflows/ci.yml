@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+# Cancel superseded runs on the same ref, but never cancel master.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+jobs:
+  test:
+    # Matrix both pinned grammars explicitly, so a version-specific regression cannot
+    # hide behind the default. tests/conftest.py's `spec_key` fixture parametrizes most
+    # tests; this matrix additionally guards the version-resolution paths.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Fast test suite
+        run: pytest tests/ -q --deselect tests/differential
+
+      # The generated parsers ship in the wheel, so the wheel itself must be importable
+      # on a machine with no JVM and no grammar sources. That is a release property, and
+      # CI is the only place it is actually true.
+      - name: Wheel imports with no JVM
+        run: |
+          pip install build
+          python -m build --wheel
+          pip install dist/*.whl --force-reinstall --no-deps
+          cd /tmp && python -c "
+          from sparkscreen import screen
+          r = screen('spark.sql(\"DROP TABLE prod.users\")')
+          assert r.verdict.value == 'deny', r.findings
+          print('wheel ok, verdict:', r.verdict.value)
+          "
+          python -c "
+          import importlib.resources as res
+          import sparkscreen.grammar.generated.spark_4_0 as g
+          print('generated parser present:', g.__file__)
+          "
+
+  differential:
+    # Runs the grammar against a real engine. This is the only job that catches a
+    # parser that disagrees with the Spark it claims to screen for -- the case-insensitivity
+    # bug was invisible to the entire hand-written corpus.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install with pyspark
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" pyspark==3.5.1
+
+      - name: Differential suite against real Spark 3.5.1
+        env:
+          JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
+        run: PYTHONPATH=src:. pytest tests/differential -q
+
+  grammar-build:
+    # Regenerating the parsers is a maintainer step, and a broken translation would
+    # otherwise surface only at the next release. Run it and require a clean diff.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Regenerate parsers from the pinned grammars
+        run: |
+          pip install -e .
+          python -m sparkscreen.grammar.build --generate
+          git diff --exit-code -- src/sparkscreen/grammar/generated \
+            || (echo "::error::generated parsers are stale; run the build and commit"; exit 1)
+
+  build-wheels:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install build && python -m build --wheel
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}

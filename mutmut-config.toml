@@ -1,0 +1,26 @@
+# sparkscreen mutation testing config (mutmut)
+#
+# Why this is here: a screener's worst possible bug is one that silently turns DENY into
+# ALLOW, and ordinary coverage cannot see that -- the line still executes, it just
+# returns the wrong answer. Mutation testing measures whether the *assertions* would
+# catch it.
+#
+#     uv pip install mutmut
+#     mutmut run                      # whole suite
+#     mutmut run tests/test_verdicts.py
+#     mutmut results                   # survivors
+#
+# Targets are scoped to the decision logic on purpose. The grammar port and the ANTLR
+# glue are vendored/generated or exercised by the differential suite against a real
+# Spark; mutating them produces noise, not signal.
+[tool.mutmut]
+paths_to_mutate = [
+    "src/sparkscreen/policy.py",
+    "src/sparkscreen/model.py",
+    "src/sparkscreen/screen.py",
+    "src/sparkscreen/analysis/treewalk.py",
+]
+tests_dir = "tests/"
+pytest_add_cli_args = ["-q", "-x", "--no-header"]
+timeout_multiplier = 4.0
+jobs = 4

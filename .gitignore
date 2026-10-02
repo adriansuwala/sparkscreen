@@ -30,4 +30,4 @@ htmlcov/
 # editors / os
 .idea/
 .vscode/
-.DS_Store
+.DS_Storedist/

@@ -31,9 +31,11 @@ dev = [
   "pytest>=8",
   "hypothesis>=6.100",
   "pytest-cov>=5",
-  "mutmut>=2.4",
+  "mutmut>=3",
+  # Differential testing needs a real engine. Install the pyspark version you want to
+  # compare against alongside these; see tests/differential/.
+  "pyspark>=3.5,<4",
 ]
-rust = ["maturin>=1.5"]
 
 [project.scripts]
 sparkscreen = "sparkscreen.cli:main"
@@ -44,36 +46,28 @@ Source = "https://github.com/sparkscreen/sparkscreen"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-# Every generated grammar is its own package so its modules are importable by key
-# (sparkscreen.grammar.generated.<key>.SqlBaseParser). Listed explicitly because the
-# generated dirs contain no __init__.py of their own until the build creates them.
 include = ["sparkscreen*"]
 
 [tool.setuptools.package-data]
-# Generated parsers ship in the wheel: installing sparkscreen must not require a JVM.
-# `*` covers every grammar key; package_data globs do not cross package boundaries,
-# so each generated grammar directory needs its own listing (done dynamically below
-# in setup.py, which enumerates SPECS so a new pinned grammar needs no edit here).
+# Generated parsers ship in the wheel: installing and running sparkscreen must not
+# require a JVM. The globs cover every pinned grammar key, so adding a new one needs no
+# edit here.
 "sparkscreen" = [
   "py.typed",
   "grammar/vendored/**/*.g4",
   "grammar/generated/**/*.py",
   "grammar/generated/**/*.tokens",
-  "grammar/generated/**/*.g4",
+  "grammar/generated/**/*.interp",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
 markers = [
-  "slow: long-running tests",
+  "slow: long-running tests (needs pyspark and a JVM)",
   "fuzz: property-based tests",
 ]
 filterwarnings = ["error::DeprecationWarning"]
-
-[tool.mutation.mutmut]
-paths_to_mutate = ["src/sparkscreen/"]
-tests_dir = ["tests/"]
 
 [tool.coverage.run]
 source = ["src/sparkscreen"]

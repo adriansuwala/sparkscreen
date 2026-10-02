@@ -870,26 +870,31 @@ class TestCliExitCodes:
         _, out, _ = run_cli(path, "--no-color")
         assert "\033[" not in out
 
-    @pytest.mark.xfail(
-        reason="BUG: --spark accepts only grammar keys, but the flag's help text "
-               "advertises 'Spark version or grammar key'. cli.main passes "
-               "args.spark straight to screen(), which calls get_spec(); a bare "
-               "version like '3.5.1' raises KeyError -> UNKNOWN / exit 2. "
-               "spec_for_spark_version() exists and is exported precisely to "
-               "resolve this, and is never called by the CLI.",
-        strict=False,
-    )
     def test_spark_version_flag_accepts_a_bare_version(self, tmp_path):
+        """--spark takes a bare Spark version as well as a grammar key.
+
+        The flag's help text advertises both, and `spec_for_spark_version` exists
+        to resolve the bare form. It used to pass the string straight to screen(),
+        which raised KeyError and degraded to UNKNOWN / exit 2.
+        """
         path = write(tmp_path, "ok.py", sql_call("select * from prod.t"))
         code, out, _ = run_cli(path, "--spark", "3.5.1", "--no-color")
         assert code == EXIT_ALLOW
         assert "grammar=spark-3.5.1" in out
 
     def test_unknown_spark_version_exits_two(self, tmp_path):
+        """An unusable --spark value is a hard error, reported on stderr.
+
+        The CLI now resolves the flag itself (grammar key or bare version) rather
+        than letting screen() raise KeyError and degrade to a report, so the
+        failure surfaces before any analysis with the known keys listed.
+        """
         path = write(tmp_path, "ok.py", sql_call("select * from prod.t"))
-        code, out, _ = run_cli(path, "--spark", "9.9.9", "--no-color")
+        code, out, err = run_cli(path, "--spark", "9.9.9", "--no-color")
         assert code == EXIT_UNKNOWN
-        assert "unsupported_spark_version" in out
+        assert "unknown Spark version" in err
+        assert "spark-4.0" in err
+        assert out == ""
 
     def test_grammar_key_is_accepted(self, tmp_path):
         path = write(tmp_path, "ok.py", sql_call("select * from prod.t"))
