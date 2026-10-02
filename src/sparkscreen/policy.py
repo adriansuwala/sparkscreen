@@ -102,16 +102,17 @@ DESTRUCTIVE_LABELS: tuple[str, ...] = (
     "AlterClusterBy",
     "SetTableSerDe",
     "SetTableCollation",
+    "AlterTableCollation",
     "AddTableConstraint",
     "HiveChangeColumn",
     "HiveReplaceColumns",
 )
 
-#: Statements that are inherently read-only. Used by the default policy to distinguish
-#: "we recognised it and it's fine" from "we didn't recognise it" (which is UNKNOWN).
+#: Statements that are inherently read-only, keyed on the *resolved* statement label
+#: (i.e. after `effective_label` has descended through wrappers). Anything not listed
+#: here and not matched by a rule is UNKNOWN, which is the fail-closed default.
 READ_ONLY_LABELS: tuple[str, ...] = (
     "StatementDefault",       # a plain query
-    "DmlStatement",           # INSERT INTO / DELETE / UPDATE / MERGE  (see rules below)
     "Use",
     "UseNamespace",
     "SetCatalog",
@@ -301,6 +302,41 @@ class Policy:
 # built-in policies
 # ---------------------------------------------------------------------------
 
+def policy_label_drift(policy: "Policy | None" = None) -> dict[str, list[str]]:
+    """Report labels that appear in exactly one of the two label sets.
+
+    `DESTRUCTIVE_LABELS` and the rules' `labels` are maintained separately, which is a
+    duplication bug waiting to happen. The two failure directions are not equally
+    serious, so they are reported separately:
+
+    * `destructive_only` -- listed as destructive, but no rule acts on it. Always a bug:
+      the listing is dead, and whoever wrote it thought the statement was handled.
+    * `deny_rules_only` -- matched by a rule that DENIES, but absent from
+      DESTRUCTIVE_LABELS. Also always a bug: the namespace allowlist only tightens
+      labels in DESTRUCTIVE_LABELS, so this statement is exempt from the allowlist.
+    * `review_rules_only` -- matched by an UNKNOWN/review rule only. Expected, and not a
+      bug: a read-only query, a CALL, or a row mutation is deliberately not
+      namespace-destructive, so the allowlist has nothing to say about it.
+
+    Both real categories already happened while this was being written, which is why the
+    split exists rather than a single "drift" list: a one-directional check would either
+    have hidden the first bug or cried wolf about the third.
+    """
+    rules = (policy or default_policy()).rules
+    all_labels: set[str] = set()
+    deny_labels: set[str] = set()
+    for rule in rules:
+        all_labels |= set(rule.labels)
+        if rule.verdict is Verdict.DENY:
+            deny_labels |= set(rule.labels)
+    destructive = set(DESTRUCTIVE_LABELS)
+    return {
+        "destructive_only": sorted(destructive - all_labels),
+        "deny_rules_only": sorted(deny_labels - destructive),
+        "review_rules_only": sorted((all_labels - deny_labels) - destructive),
+    }
+
+
 def default_policy() -> Policy:
     """Deny-by-default for destructive statements; UNKNOWN for unrecognised ones."""
     rules = [
@@ -374,13 +410,20 @@ def default_policy() -> Policy:
             ),
         ),
         Rule(
-            id="review.delete-update-merge",
+            id="review.row-mutation",
             verdict=Verdict.UNKNOWN,
             reason=Reason.DESTRUCTIVE_STATEMENT,
-            message="mutates rows in place (DELETE / UPDATE / MERGE); "
+            message="mutates rows in place (DELETE / UPDATE / MERGE / INSERT); "
                     "needs review to confirm the WHERE clause",
             severity=Severity.HIGH,
-            labels=("DmlStatement",),
+            # Resolved labels, not the `DmlStatement` wrapper: effective_label() descends
+            # through the wrapper, so keying on it would make this rule dead code and let
+            # DELETE/UPDATE/MERGE fall through to the generic UNKNOWN -- right verdict,
+            # wrong reason, and no operator-visible explanation.
+            labels=(
+                "DeleteFromTable", "UpdateTable", "MergeIntoTable",
+                "InsertIntoTable", "InsertIntoPartition",
+            ),
         ),
         Rule(
             id="review.call",
@@ -389,6 +432,14 @@ def default_policy() -> Policy:
             message="CALL may invoke a procedure with side effects; needs review",
             severity=Severity.MEDIUM,
             labels=("Call",),
+        ),
+        Rule(
+            id="review.structural-index",
+            verdict=Verdict.UNKNOWN,
+            reason=Reason.DESTRUCTIVE_STATEMENT,
+            message="creates or drops an index or session variable; needs review",
+            severity=Severity.MEDIUM,
+            labels=("CreateIndex", "DropVariable"),
         ),
         Rule(
             id="allow.query",

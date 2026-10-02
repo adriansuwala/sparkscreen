@@ -110,11 +110,23 @@ def get_spec(key: str | None = None) -> GrammarSpec:
 
 
 def spec_for_spark_version(version: str) -> GrammarSpec:
-    """Pick the grammar for a Spark version like '3.5.1' or '4.0.0'."""
-    norm = version.strip().lstrip("v")
+    """Pick the grammar for a Spark version like '3.5.1', '4.0.0', or '4.0'.
+
+    Matching is exact first, then falls back to a major.minor prefix, because Spark
+    versions get written both ways in practice ('4.0' as well as '4.0.0') and the
+    grammar we ship is a single pinned commit per line rather than one per patch
+    release. The prefix match is deliberately restricted to two components so that
+    '3.5' cannot silently select a 3.5.1-specific grammar as if it were 3.5.0.
+    """
+    norm = version.strip().lstrip("vV")
     for s in SPECS:
         if norm in s.spark_versions:
             return s
+    parts = norm.split(".")
+    if len(parts) == 2:
+        for s in SPECS:
+            if any(v.startswith(norm + ".") for v in s.spark_versions):
+                return s
     known = ", ".join(f"{s.key}={s.spark_versions}" for s in SPECS)
     raise KeyError(f"no pinned grammar for Spark {version!r}; supported: {known}")
 

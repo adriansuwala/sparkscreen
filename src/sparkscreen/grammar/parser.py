@@ -2,19 +2,30 @@
 
 Two things matter here and both are easy to get wrong:
 
-1. **No error recovery.** ANTLR's default error strategy happily produces a usable
-   parse tree for invalid SQL -- `INSERT INTO t SELECT * FROM` and
-   `SELECT * FROM t WHERE` both parse. A security screener that analyzes such a tree
-   is analyzing something Spark would never run. We install `BailErrorStrategy` so
-   malformed SQL is rejected outright.
+1. **No error recovery.** ANTLR's default error strategy returns a usable parse tree for
+   genuinely broken SQL -- it deletes and synthesises tokens to keep going. Measured on
+   a 13-input corpus, 9 of the broken ones are accepted that way, including
+   `INSERT INTO`, `DROP TABLE t WHERE` and `SELECT ((((1))))))`. We install
+   `BailErrorStrategy` so those are rejected outright.
+
+   Note this is *not* the same as Spark's `errorCapturingIdentifier` leniency. Spark's
+   grammar deliberately accepts some malformed input so the engine can attach a better
+   error later, and real Spark does accept `SELECT * FROM t WHERE` (it then fails with
+   AnalysisException). We accept exactly what the engine accepts -- see
+   tests/test_parser.py, which pins both categories so the distinction cannot rot.
 
 2. **Fail closed.** Every failure mode -- lexer error, parse error, recursion limit,
    resource limit -- is an exception or an explicit rejection. There is no path that
    turns "I could not parse this" into "nothing dangerous found".
 
-The `errorCapturingIdentifier` rule in Spark's grammar is why (1) matters: the grammar
-deliberately accepts malformed identifiers so it can produce a better error message
-later. We want the opposite.
+## A correctness note on case
+
+The ported grammar sets `options { caseInsensitive = true; }`. This is load-bearing.
+The vendored grammars spell keywords in uppercase, and 3.5.1 declares
+`fragment LETTER : [A-Z]`, so a literal port rejects `select 1`, `drop table t` and
+`SeLeCt 1` -- all of which real Spark accepts. Lowercase SQL is the common case in
+agent-written PySpark, so without this the screener would be unusable while passing a
+test suite written in uppercase.
 """
 
 from __future__ import annotations

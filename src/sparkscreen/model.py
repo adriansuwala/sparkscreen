@@ -100,6 +100,26 @@ class Finding:
 
     @property
     def is_unknown(self) -> bool:
+        """True when this finding's verdict is UNKNOWN.
+
+        Note this asks the *verdict*, not the reason. The two are independent axes and
+        conflating them is a fail-open bug: a policy rule can legitimately be
+        `verdict=UNKNOWN` with `reason=DESTRUCTIVE_STATEMENT` (DELETE/MERGE are parsed
+        fine -- we just want a human to confirm the WHERE clause). Aggregating on
+        `reason in UNKNOWN_REASONS` instead of on the verdict made every such rule
+        report as ALLOW, so `DELETE FROM prod.users` was waved through. See
+        `Report.verdict`.
+        """
+        return self.verdict is Verdict.UNKNOWN
+
+    @property
+    def is_analysis_failure(self) -> bool:
+        """True when the reason says analysis could not complete (vs. a review verdict).
+
+        This is a *classification* for reporting and filtering -- "we couldn't look" as
+        opposed to "we looked and a human should decide" -- and is never used to compute
+        a verdict. Use `is_unknown` for that.
+        """
         return self.reason in UNKNOWN_REASONS
 
     def to_dict(self) -> dict[str, Any]:
@@ -134,9 +154,15 @@ class Report:
 
     @property
     def verdict(self) -> Verdict:
-        """Worst verdict present. UNKNOWN outranks ALLOW but not DENY.
+        """Worst verdict present. DENY outranks UNKNOWN outranks ALLOW.
 
-        UNKNOWN outranks ALLOW deliberately: a report with one unanalyzable sink
+        Aggregated on each finding's *verdict*, never on its reason. The reason is
+        metadata for a human reader; the verdict is the decision. Deriving one from the
+        other is how DELETE/MERGE/INSERT silently became ALLOW -- the rules that carry
+        them are `verdict=UNKNOWN, reason=DESTRUCTIVE_STATEMENT`, and the old code asked
+        whether the reason was in UNKNOWN_REASONS.
+
+        UNKNOWN outranks ALLOW deliberately: a report containing one unanalyzable sink
         cannot be summarised as "allowed", because we do not actually know.
         """
         if any(f.verdict is Verdict.DENY for f in self.findings):
@@ -144,6 +170,15 @@ class Report:
         if any(f.is_unknown for f in self.findings):
             return Verdict.UNKNOWN
         return Verdict.ALLOW
+
+    @property
+    def analysis_failures(self) -> list[Finding]:
+        """Findings where analysis could not complete at all, as opposed to a review.
+
+        Useful for dashboards: "we couldn't look" is a different problem from "we looked
+        and a human should decide". Never affects the verdict.
+        """
+        return [f for f in self.findings if f.is_analysis_failure]
 
     @property
     def ok(self) -> bool:

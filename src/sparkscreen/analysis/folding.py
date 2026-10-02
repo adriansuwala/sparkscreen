@@ -14,6 +14,13 @@ arguments, `str.format`, `"".join`, and `.upper()`/`.lower()`/`.strip()`.
 What it deliberately does NOT do: track types, model exceptions, or evaluate arbitrary
 calls. When it cannot prove a value, it returns `None` -- and `None` flows into the
 UNKNOWN verdict, never into "safe".
+
+A known gap, recorded rather than papered over: this folds module-level constant
+bindings only. It does not thread constants into or out of function bodies, so
+`def run(tbl): spark.sql(f"drop table {tbl}")` is unresolved even when every caller
+passes a literal. That is the correct fail-closed outcome, but it means a policy written
+against heavily-factored agent code will see more UNKNOWN than a human reviewer expects.
+Interprocedural constant propagation is the obvious next step.
 """
 
 from __future__ import annotations

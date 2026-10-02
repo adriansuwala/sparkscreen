@@ -24,14 +24,19 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .grammar.spec import SPECS
-from .model import UNKNOWN_REASONS, Verdict
+from .grammar.spec import SPECS, spec_for_spark_version
+from .model import Verdict
 from .policy import default_policy, load_policy, read_only_policy
 from .screen import screen
 
 EXIT_ALLOW = 0
 EXIT_DENY = 1
 EXIT_UNKNOWN = 2
+
+#: Public grammar keys, e.g. "spark-4.0". Note the dots: these are CLI-facing names and
+#: are deliberately not valid Python identifiers, so `--list-grammars` prints them while
+#: the generated package directories use underscore names.
+SPEC_KEYS = frozenset(s.key for s in SPECS)
 
 _COLORS = {
     Verdict.ALLOW: "\033[32m",
@@ -109,6 +114,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"sparkscreen: cannot read {args.path}: {e}", file=sys.stderr)
         return EXIT_UNKNOWN
 
+    # Accept either a grammar key ("spark-3.5.1") or a bare Spark version ("3.5.1").
+    # The flag advertises both, and resolving the bare form is what
+    # `spec_for_spark_version` exists for -- without this the CLI advertised a
+    # convenience it did not provide, and passed the string straight through to
+    # screen(), where an unrecognised value raises KeyError and degrades to UNKNOWN.
+    if args.spark and args.spark not in SPEC_KEYS:
+        try:
+            args.spark = spec_for_spark_version(args.spark).key
+        except KeyError:
+            print(
+                f"sparkscreen: unknown Spark version or grammar {args.spark!r}. "
+                f"Known: {', '.join(sorted(SPEC_KEYS))}",
+                file=sys.stderr,
+            )
+            return EXIT_UNKNOWN
+
     if args.policy:
         try:
             policy = load_policy(args.policy)
@@ -128,11 +149,18 @@ def main(argv: list[str] | None = None) -> int:
         use_color = not args.no_color and sys.stdout.isatty()
         print(_render(report, use_color))
 
-    if report.verdict is Verdict.DENY:
-        return EXIT_DENY
-    if any(f.reason in UNKNOWN_REASONS for f in report.findings):
-        return EXIT_UNKNOWN
-    return EXIT_ALLOW
+    # Exit code from the report's verdict -- the same value that was printed above.
+    #
+    # Deriving it from findings' reasons instead was a fail-open bug: a rule may be
+    # `verdict=UNKNOWN` with a non-UNKNOWN reason (OUTSIDE_ALLOWLIST, or
+    # DESTRUCTIVE_STATEMENT for a row mutation), so the CLI printed UNKNOWN and exited
+    # 0. A caller gating on the exit code would then treat unanalyzed code as approved,
+    # which is exactly the false assurance this tool exists to prevent.
+    return {
+        Verdict.ALLOW: EXIT_ALLOW,
+        Verdict.DENY: EXIT_DENY,
+        Verdict.UNKNOWN: EXIT_UNKNOWN,
+    }[report.verdict]
 
 
 if __name__ == "__main__":
