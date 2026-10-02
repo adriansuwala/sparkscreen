@@ -17,14 +17,102 @@ internal failure mode maps here. Nothing in this package has a path from
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any
+from enum import Enum, Flag
+from typing import Any, Iterable
 
 
 class Verdict(str, Enum):
     ALLOW = "allow"
     DENY = "deny"
     UNKNOWN = "unknown"
+
+
+class Effect(Flag):
+    """What an operation *does*, independent of what the policy decided about it.
+
+    Orthogonal to `Verdict` on purpose. The verdict axis answers "what did the policy
+    conclude" -- which depends on the configured rules, the namespace allowlists and
+    the operator's intent. This axis answers "what would Spark do if it ran", which
+    depends only on the statement. Conflating the two was the original bug: a
+    `DROP TABLE` is `DESTRUCTIVE_STATEMENT` under one policy and a reviewable
+    `WRITE_SCHEMA` under another, but it destroys the table either way.
+
+    A `Flag`, not a single-valued enum, because the axes are genuinely orthogonal and
+    a single value cannot express the cases that matter:
+
+        ALTER TABLE t DROP COLUMN a   -- schema change AND data destruction
+        TRUNCATE TABLE t              -- data destruction, schema untouched
+        LOAD DATA LOCAL INPATH '...'  -- reads the driver's filesystem AND writes rows
+
+    A single-valued design was tried and rejected: it forced a choice between "it is
+    a schema change" and "it destroys data", and whichever was picked lost the other.
+
+    Note what is deliberately *not* here: there is no `Effect.UNKNOWN`. An effect set
+    is a set of flags that are *known to apply*, so an empty set is ambiguous between
+    "we analysed this and it does nothing durable" (`USE prod`) and "we could not
+    analyse it at all" (unparseable SQL). Absence is the signal for the second, and it
+    is carried by the verdict/reason axes -- `Finding.effect` is empty for both cases
+    and the caller distinguishes them with `is_analysis_failure`, exactly as it already
+    distinguishes UNKNOWN from DENY. Adding an `UNKNOWN` member here would destroy
+    that distinction, which is why this type has none.
+
+    Plain `Flag` rather than `str, Flag` on purpose: with a `str` mixin,
+    `Effect.DESTROY_DATA == "destroy_data"`, so a bare string could silently enter an
+    effect set and be compared as if it were the flag. Nothing in this package should
+    be coercible into an effect by accident.
+    """
+
+    #: Changes structure: columns, constraints, indexes, tables, views, namespaces.
+    WRITE_SCHEMA = 1
+    #: Changes rows: INSERT / UPDATE / DELETE / MERGE.
+    WRITE_DATA = 2
+    #: Irreversibly loses data or a durable object. Cannot be undone by re-running.
+    DESTROY_DATA = 4
+    #: Reads table rows.
+    READ_DATA = 8
+    #: Reads the *driver's* local filesystem (`LOAD DATA LOCAL INPATH`).
+    READ_LOCAL_FS = 16
+    #: Loads code that will be executed (`ADD JAR` / `CREATE FUNCTION ... USING JAR`).
+    LOAD_CODE = 32
+    #: Touches a system outside the cluster: a filesystem path, a catalog, or a
+    #: procedure whose body we cannot see.
+    REACHES_EXTERNAL = 64
+    #: Changes runtime or session state: `SET spark.*`, CACHE, SET ROLE, MSCK REPAIR.
+    CHANGE_CONFIG = 128
+
+    @classmethod
+    def _ordered(cls) -> tuple["Effect", ...]:
+        """Members in declaration order -- powers of two, so `sorted` on values."""
+        return tuple(sorted(cls, key=lambda m: m.value))
+
+    def __str__(self) -> str:
+        """Render a combination as `WRITE_SCHEMA|DESTROY_DATA`, not `Effect.X|Y`.
+
+        Combination flags inherit `Flag.__str__`, which prints the repr of every
+        member. That is unreadable in a report and unreadable in an assertion failure,
+        and this type exists to be printed.
+        """
+        names = [f.name for f in type(self)._ordered() if f and f in self]
+        return "|".join(n for n in names if n)
+
+
+def effect_names(effects: "frozenset[Effect] | Iterable[Effect]") -> list[str]:
+    """Sorted member names, for JSON and reports.
+
+    Composite values are expanded. Iterating a `Flag` yields one element per *member*,
+    but a set can also hold a composite pseudo-member (`Effect(3)`), whose `.name` is
+    the joined string `"WRITE_SCHEMA|WRITE_DATA"` -- a single list entry that no
+    consumer can match against a member name. Expanding on the way out means callers
+    always get individual flags, whatever shape went in.
+    """
+    out: set[str] = set()
+    for e in effects:
+        if not e.value:
+            continue
+        for member in Effect._ordered():
+            if member and member in e:
+                out.add(member.name)
+    return sorted(n for n in out if n)
 
 
 class Reason(str, Enum):
@@ -105,6 +193,29 @@ class Finding:
     targets: tuple[str, ...] = ()
     #: Rule name for a matched policy rule, for human-readable reports.
     matched_label: str | None = None
+    #: What the statement does, as a set of orthogonal `Effect` flags.
+    #:
+    #: Independent of `verdict`: a `DROP TABLE` is DESTROY_DATA here whichever policy
+    #: ran, and is DENY or UNKNOWN depending on namespace allowlists.
+    #:
+    #: Empty means "no known effect", and is NOT the same as "harmless". A statement we
+    #: could not analyse at all (unparseable SQL, an unresolved dynamic string, a
+    #: resource limit) gets an empty set deliberately: we have no idea what it does,
+    #: and inventing `READ_DATA` because that is the common case would be exactly the
+    #: confident wrong answer this package exists to avoid. `is_analysis_failure` is
+    #: what tells the two apart.
+    effect: frozenset[Effect] = frozenset()
+
+    def effect_flags(self) -> Effect:
+        """The effect set collapsed into a single combinable flag value."""
+        out = Effect(0)
+        for e in self.effect:
+            out |= e
+        return out
+
+    def has_effect(self, *effects: Effect) -> bool:
+        """True if every flag in `effects` is present."""
+        return all(e in self.effect for e in effects)
 
     @property
     def is_unknown(self) -> bool:
@@ -142,6 +253,7 @@ class Finding:
             "rule": self.rule,
             "matched_label": self.matched_label,
             "targets": list(self.targets),
+            "effect": effect_names(self.effect),
         }
 
 
@@ -193,6 +305,28 @@ class Report:
         """True only when the verdict is ALLOW with no unknowns."""
         return self.verdict is Verdict.ALLOW
 
+    @property
+    def effects(self) -> frozenset[Effect]:
+        """Every effect seen anywhere in the report, unioned across findings.
+
+        A summary, not a verdict. It answers "how big is the blast radius of this
+        snippet" without reference to policy -- "this code drops tables and loads jars"
+        is true regardless of whether the configured policy denied it, allowed it, or
+        never heard of it.
+
+        Empty when every finding failed analysis. That is not "this snippet is
+        harmless", and callers must not read it that way: the verdict and
+        `analysis_failures` are what say whether anything was actually determined.
+        """
+        out: set[Effect] = set()
+        for f in self.findings:
+            out |= f.effect
+        return frozenset(out)
+
+    def by_effect(self, effect: Effect) -> list[Finding]:
+        """Findings carrying `effect`. Union-aware: partial flags are not accepted."""
+        return [f for f in self.findings if effect in f.effect]
+
     def by_verdict(self, verdict: Verdict) -> list[Finding]:
         return [f for f in self.findings if f.verdict is verdict]
 
@@ -202,6 +336,7 @@ class Report:
             "policy": self.policy,
             "grammar": self.grammar,
             "lines": self.lines,
+            "effects": effect_names(self.effects),
             "findings": [f.to_dict() for f in self.findings],
         }
 

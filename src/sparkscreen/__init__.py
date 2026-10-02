@@ -18,12 +18,14 @@ found. Unanalyzable input produces UNKNOWN, never a false "ok".
 """
 
 from .model import (
+    Effect,
     Finding,
     Reason,
     Report,
     Severity,
     UNKNOWN_REASONS,
     Verdict,
+    effect_names,
 )
 from .policy import (
     Limits,
@@ -44,6 +46,8 @@ __all__ = [
     "Finding",
     "Report",
     "Verdict",
+    "Effect",
+    "effect_names",
     "Reason",
     "Severity",
     "UNKNOWN_REASONS",

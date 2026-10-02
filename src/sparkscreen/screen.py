@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 
+from .analysis.effects import effects_for_label
 from .analysis.folding import fold_sinks
 from .analysis.treewalk import (
     extract_namespaces,
@@ -164,12 +165,27 @@ def _eval_one(
     # callers want one finding per statement; policy returns allowlist notes plus the
     # main verdict, so keep them all but ensure at least one exists
     if not findings:
-        return Finding(
+        findings = [Finding(
             verdict=Verdict.UNKNOWN,
             reason=Reason.UNSUPPORTED_STATEMENT,
             message=f"no policy decision produced for {label}",
             line=line, sql=sql, statement=label,
-        )
+        )]
+    # Attach the effect axis. This is additive and cannot change a verdict: the
+    # classification is a pure function of the statement label, and a statement we
+    # parsed successfully either has an entry or is a bug in the table.
+    #
+    # `effects_for_label` raises on an unmapped label rather than returning an empty
+    # set, and that error is deliberately NOT caught here. Swallowing it would leave
+    # the finding with a default `frozenset()` -- indistinguishable from "this
+    # statement does nothing", which is a fail-open reading of a DROP. `tests/
+    # test_effects.py` asserts the table is total against the generated parsers, so
+    # this can only fire when a grammar has gained a statement the table has not
+    # caught up with, and crashing is the correct outcome: a screener that cannot
+    # classify what it just parsed must not report a result.
+    effects = effects_for_label(label)
+    for f in findings:
+        f.effect = effects
     return findings[0] if len(findings) == 1 else _combine(findings)
 
 
