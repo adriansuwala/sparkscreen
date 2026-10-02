@@ -161,3 +161,69 @@ def test_valid_python_with_no_sql_is_allow():
     """The control case: not every snippet is a problem."""
     assert screen("this is not python").ok          # a valid expression
     assert screen("x = 1\ndef f(a):\n    return a + x\n").ok
+
+
+# ---------------------------------------------------------------------------
+# Policy-shape traps
+# ---------------------------------------------------------------------------
+
+def test_both_allowlists_apply_independently():
+    """`readable_namespaces` must not be shadowed by `writable_namespaces`.
+
+    Regression test. The two checks were joined with `elif`, so a policy setting both
+    -- "you may write staging, you may read prod", the ordinary shape of a real policy
+    -- silently checked only the writable half. `staging.x` is writable and plainly not
+    readable, and nothing objected.
+    """
+    from sparkscreen.policy import Policy, default_policy
+
+    base = default_policy()
+    policy = Policy(
+        name="both", rules=base.rules,
+        writable_namespaces=("staging.*",), readable_namespaces=("prod.*",),
+    )
+    writable_but_unreadable = screen('spark.sql("DROP TABLE staging.x")', policy)
+    assert writable_but_unreadable.verdict is Verdict.UNKNOWN
+    assert any(f.reason is Reason.OUTSIDE_ALLOWLIST
+               for f in writable_but_unreadable.findings)
+
+    fully_allowed = screen('spark.sql("SELECT * FROM prod.x")', policy)
+    assert fully_allowed.verdict is Verdict.ALLOW
+
+    fully_denied = screen('spark.sql("SELECT * FROM other.x")', policy)
+    assert fully_denied.verdict is Verdict.UNKNOWN
+
+
+def test_outside_allowlist_is_a_review_not_an_analysis_failure():
+    """OUTSIDE_ALLOWLIST means "we looked and it's outside policy", not "we couldn't look".
+
+    It carries an UNKNOWN verdict -- a human should look -- but it must stay out of
+    UNKNOWN_REASONS so `Report.analysis_failures` can distinguish the two. This split is
+    what lets a dashboard say "we couldn't analyse N snippets" separately from "N
+    statements were outside policy".
+    """
+    from sparkscreen.policy import Policy, default_policy
+
+    base = default_policy()
+    policy = Policy(name="r", rules=base.rules, readable_namespaces=("prod.*",))
+    report = screen('spark.sql("SELECT * FROM secret.s")', policy)
+    assert report.verdict is Verdict.UNKNOWN
+    assert Reason.OUTSIDE_ALLOWLIST not in UNKNOWN_REASONS
+    assert not report.analysis_failures
+
+
+def test_empty_policy_is_not_allow_everything():
+    """`Policy()` with no rules still allows queries -- and that is worth knowing.
+
+    The obvious way to write an allow-nothing policy does not do that: with no rules,
+    anything in READ_ONLY_LABELS is ALLOW. So `Policy()` is closer to
+    "allow read-only, escalate everything else" than to "allow nothing". Pinned here so
+    the behaviour is a decision rather than an accident.
+    """
+    from sparkscreen.policy import Policy
+
+    assert screen("spark.sql('select 1')", Policy()).ok
+    # ...but nothing destructive slips through it.
+    assert screen("spark.sql('drop table t')", Policy()).verdict is Verdict.UNKNOWN
+    assert screen("spark.sql('insert overwrite table t select 1')", Policy()).verdict \
+        is Verdict.UNKNOWN

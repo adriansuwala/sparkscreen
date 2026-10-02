@@ -260,7 +260,12 @@ class Policy:
                     message = f"{rule.message} (matched {lit!r})"
                     break
 
-        # Namespace allowlists tighten an otherwise-allow verdict.
+        # Namespace allowlists. These are two independent checks, not alternatives:
+        # a statement can be writable in a namespace it is not allowed to read from, and
+        # "writable here, readable there" is the normal shape of a real policy. They were
+        # previously joined with `elif`, so setting both lists silently disabled the
+        # readable check for every destructive statement -- the check that fires first
+        # ate the other one.
         if self.writable_namespaces and label in DESTRUCTIVE_LABELS:
             for t in targets:
                 if not any(t.matches(pat) for pat in self.writable_namespaces):
@@ -273,7 +278,7 @@ class Policy:
                         rule=rule.id if rule else None,
                         targets=(t.name,),
                     ))
-        elif self.readable_namespaces:
+        if self.readable_namespaces:
             for t in targets:
                 if not any(t.matches(pat) for pat in self.readable_namespaces):
                     findings.append(Finding(
@@ -282,6 +287,7 @@ class Policy:
                         message=f"{t.name} is outside the readable namespaces "
                                 f"{list(self.readable_namespaces)}; needs review",
                         line=line, sql=sql, statement=label,
+                        rule=rule.id if rule else None,
                         targets=(t.name,),
                     ))
 

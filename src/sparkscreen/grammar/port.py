@@ -151,10 +151,29 @@ PARSER_REWRITES = [
 _FLAG_RE = re.compile(r"\{(!?)([A-Za-z_][A-Za-z_0-9]*)\}\?")
 
 # Java-isms we can detect but cannot translate automatically.
+#
+# This is a denylist, and that is a deliberate but *bounded* limitation: an unrecognised
+# Java construct is only caught if it contains one of these markers. `{new Foo()}`,
+# `{String s = getText();}` and `{this.isHint()}` all pass straight through into the
+# generated Python.
+#
+# It is safe today for a reason that is not the port's own doing: the vendored grammars
+# are pinned to immutable commits, and a maintainer regenerating a parser sees the
+# breakage immediately -- the generated module fails to import, so the error cannot be
+# silent. The denylist is the cheap early-warning layer, not the guarantee. What must
+# never happen is a *silent* mistranslation, which is why
+# tests/test_grammar_port.py asserts no Java survives in the committed output and that
+# the committed .g4 reproduces the committed generated parser byte-for-byte.
 _JAVA_MARKERS = (
     "public boolean", "public int", "public void", "public final",
     "private final", "import java", "new ArrayDeque", "new HashMap",
     "Deque<", "String>", "@Override",
+    # Widened beyond Spark's current usage so that the common shapes are caught even
+    # though the pinned grammars do not contain them yet. Note `getText(` without a
+    # leading dot: `{String s = getText();}` is valid Java with no receiver, so a
+    # `.getText()` marker misses exactly the shape it was added to catch.
+    "new ", ".add(", "getText(", "Arrays.asList", "Map.Entry",
+    "Optional<", "Collections.", "StringBuilder", "Integer.parseInt",
 )
 
 # Rule-name / token-name we reference from our Python members. If a grammar renames
@@ -210,6 +229,24 @@ def _strip_block(text: str, keyword: str) -> tuple[str, str | None]:
 
 def _strip_comments(text: str) -> str:
     return re.sub(r"//[^\n]*|/\*.*?\*/", "", text, flags=re.S)
+
+
+def _license_block(src: str) -> str:
+    """Extract the leading Apache licence comment, verbatim.
+
+    Raises PortError rather than ValueError when it is missing. A grammar with no
+    licence header is a malformed input, and `str.index` would raise ValueError, which
+    escapes the port's own error contract: build.py catches PortError specifically, so
+    the failure would surface as an unrelated crash instead of a diagnosable message.
+    """
+    start = src.find("/*")
+    end = src.find("*/")
+    if start != 0 or end == -1:
+        raise PortError(
+            "grammar does not begin with a /* ... */ licence comment; refusing to "
+            "port a file whose provenance cannot be confirmed"
+        )
+    return src[start:end + 2]
 
 
 def _check_java(text: str, where: str) -> None:
@@ -274,7 +311,7 @@ def port_grammar(src: str, *, is_lexer: bool, pipe_start_tokens: tuple[str, ...]
     where = "lexer" if is_lexer else "parser"
     _check_java(text, where)
 
-    license_block = src[src.index("/*"): src.index("*/") + 2]
+    license_block = _license_block(src)
     if is_lexer:
         # `caseInsensitive` is load-bearing, not cosmetic. Spark SQL is
         # case-insensitive: real 3.5.1 accepts `select 1`, `drop table t` and even

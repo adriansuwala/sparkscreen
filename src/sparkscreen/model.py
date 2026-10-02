@@ -55,7 +55,15 @@ class Reason(str, Enum):
     ANALYSIS_ERROR = "analysis_error"
 
 
-#: Reasons that mean "we could not analyze this". Anything else is a real verdict.
+#: Reasons that mean "we could not clear this". Classification only -- it must never be
+#: used to compute a verdict (see `Finding.is_unknown` and `Report.verdict`).
+#:
+#: Note this is a *subset* of the reasons that can accompany an UNKNOWN verdict, not the
+#: definition of one. OUTSIDE_ALLOWLIST is the deliberate counter-example: a
+#: fully-analysed statement that simply touches a namespace the policy does not permit is
+#: UNKNOWN (a human should look) but is not an analysis failure (we did the analysis).
+#: Keeping OUTSIDE_ALLOWLIST out of this set is what lets a dashboard say "we couldn't
+#: look" separately from "we looked, and it's outside policy".
 UNKNOWN_REASONS = frozenset({
     Reason.UNPARSEABLE_SQL,
     Reason.UNRESOLVED_DYNAMIC_SQL,

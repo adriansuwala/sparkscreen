@@ -329,31 +329,124 @@ def test_script_flattening_yields_all_statements(key, sql):
 
     Scoped to spark-4.0: `BEGIN...END` scripts are a 4.0 addition, and 3.5.1
     correctly rejects them (there is no `compoundOrSingleStatement` rule to reach).
+
+    Compares the *flattened* labels rather than `ParsedStatement.label`. A bare DML
+    statement's top-level label is the wrapper `DmlStatement`, while `.statements`
+    tightens it to the real kind (`InsertOverwriteTable`). That divergence is by
+    design -- `_tighten` exists for it, and `screen()` reads `.statements`, not
+    `.label` -- so the flattened form is the one with policy attached to it.
+
+    SCRIPT_ONLY_LABELS covers the grammar's own asymmetry: a few statements have a
+    distinct rule for the in-script form. `SET x=1` is `SetConfiguration` on its own
+    and `SetVariableInsideSqlScript` inside BEGIN...END, because Spark distinguishes
+    the two at the grammar level. See test_set_inside_a_script_is_unmatched_by_policy
+    for the coverage consequence.
     """
     parser = _parser(key)
-    single = parser.parse(sql)
+    single = [s.label for s in parser.parse(sql).statements]
     script = parser.parse(f"BEGIN {sql}; {sql}; END")
     labels = [s.label for s in script.statements]
     assert len(labels) == 2, f"expected 2 statements, got {labels}"
     assert all(labels), f"empty statement label in script: {labels}"
-    assert single.label in labels
+    expected = [SCRIPT_ONLY_LABELS.get(lbl, lbl) for lbl in single]
+    assert labels == expected * 2, f"script {labels} != expected {expected * 2}"
+
+
+#: Statements the grammar labels differently inside a BEGIN...END script.
+SCRIPT_ONLY_LABELS = {
+    "SetConfiguration": "SetVariableInsideSqlScript",
+}
+
+
+@pytest.mark.xfail(strict=False, reason=(
+    "GAP (policy.py default rules): `SET k=v` inside BEGIN...END is labelled "
+    "SetVariableInsideSqlScript, which no default rule matches, so review.config "
+    "does not fire. Fail-closed -- the verdict is UNKNOWN either way -- but the "
+    "rule that covers the bare form is silently skipped in the script form."
+))
+@given(sql=st.sampled_from([
+    "set spark.sql.shuffle.partitions=200",
+    "SET spark.sql.x=1",
+    "set spark.sql.default.parallelism=8",
+]))
+def test_set_inside_a_script_is_matched_by_the_same_policy_rule(sql):
+    """PROPERTY: a statement matches the same policy rule inside a script as outside.
+
+    `review.config` lists `SetConfiguration`, but the in-script form of the same
+    statement is labelled `SetVariableInsideSqlScript`, so the rule does not fire and
+    the finding degrades from `review.config` to a bare
+    `unsupported_statement`. Fail-closed, so not a security hole -- but a config
+    statement a reviewer was meant to see disappears silently.
+
+    Reproducer:
+        from sparkscreen.screen import screen
+        screen('import pyspark\\nspark.sql("set spark.sql.shuffle.partitions=200")\\n')
+        #   -> unknown review.config review.config SetConfiguration
+        screen('import pyspark\\nspark.sql("BEGIN set spark.sql.shuffle.partitions=200; END")\\n')
+        #   -> unknown unsupported_statement None SetVariableInsideSqlScript
+    """
+    bare = screen(f'import pyspark\nspark.sql("{sql}")\n', spec="spark-4.0")
+    wrapped = screen(f'import pyspark\nspark.sql("BEGIN {sql}; END")\n', spec="spark-4.0")
+    bare_rules = {f.rule for f in bare.findings}
+    wrapped_rules = {f.rule for f in wrapped.findings}
+    assert bare_rules == wrapped_rules, (
+        f"{sql!r}: bare matched {bare_rules}, script form matched {wrapped_rules}"
+    )
+
+
+@given(sql=_SQL_TEXT)
+def test_begin_end_never_turns_a_deny_into_an_allow(sql):
+    """PROPERTY: the BEGIN...END wrapper never turns a DENY into an ALLOW.
+
+    The security-relevant direction of the flattening property, and the only one
+    that matters: `screen()` evaluates `.statements`, so if `_flatten` mislabelled or
+    dropped a statement, a DENY inside a script would silently become an ALLOW.
+
+    Note this asserts *not more permissive*, not *identical*. A DENY that becomes
+    UNKNOWN is still fail-closed -- it routes to a human rather than to production --
+    so it is allowed here. Only ALLOW is forbidden, because that is the one verdict
+    that tells the caller nobody looked.
+    """
+    bare = screen(f'import pyspark\nspark.sql("{sql}")\n', spec="spark-4.0")
+    wrapped = screen(f'import pyspark\nspark.sql("BEGIN {sql}; END")\n', spec="spark-4.0")
+    if bare.verdict is Verdict.DENY:
+        assert wrapped.verdict is not Verdict.ALLOW, (
+            f"BEGIN...END turned a DENY into an ALLOW for {sql!r}: {wrapped.summary()}"
+        )
 
 
 @given(key=st.sampled_from(KEYS), sql=_SQL_TEXT)
-def test_single_statement_and_one_statement_script_agree(key, sql):
-    """PROPERTY: wrapping a statement in a one-statement script changes nothing.
+def test_wrapping_never_makes_a_verdict_more_permissive(key, sql):
+    """PROPERTY: no version's BEGIN...END handling weakens a verdict.
 
-    Holds on both grammars: 4.0 has the script rules, 3.5.1 rejects the wrapper, and
-    "the wrapper is not silently accepted and mis-flattened" is the property that
-    matters on 3.5.1.
+    On 4.0 the wrapper is a real grammar construct and the verdict is preserved.
+    On 3.5.1 the wrapper does not exist, so the whole script is unparseable and the
+    verdict becomes UNKNOWN -- fail-closed, since UNKNOWN routes to a human.
+
+    What must never happen in either direction is ALLOW appearing where a stricter
+    verdict was.
     """
-    parser = _parser(key)
-    single = parser.parse(sql)
-    try:
-        script = parser.parse(f"BEGIN {sql}; END")
-    except SqlSyntaxError:
-        return          # 3.5.1: no script support, and that is correct
-    assert [s.label for s in script.statements] == [single.label]
+    bare = screen(f'import pyspark\nspark.sql("{sql}")\n', spec=key)
+    wrapped = screen(f'import pyspark\nspark.sql("BEGIN {sql}; END")\n', spec=key)
+    if bare.verdict is not Verdict.ALLOW:
+        assert wrapped.verdict is not Verdict.ALLOW, (
+            f"{key}: BEGIN...END relaxed {bare.verdict.value} to ALLOW for {sql!r}"
+        )
+
+
+@given(sql=_SQL_TEXT)
+def test_begin_end_is_rejected_by_3_5_1(sql):
+    """PROPERTY: 3.5.1 does not silently accept a construct it cannot represent.
+
+    3.5.1 predates `BEGIN...END`, so wrapping must be a clean rejection that reaches
+    the caller as UNKNOWN. Accepting it and flattening to the wrong statements would
+    be a fail-open on a version whose grammar cannot express the construct.
+    """
+    assert _parser("spark-3.5.1").try_parse(f"BEGIN {sql}; END") is None
+    report = screen(f'import pyspark\nspark.sql("BEGIN {sql}; END")\n', spec="spark-3.5.1")
+    assert report.verdict is Verdict.UNKNOWN, (
+        f"3.5.1 must report UNKNOWN for an unparseable script, got {report.summary()}"
+    )
 
 
 # ===========================================================================
@@ -543,11 +636,6 @@ def test_no_java_survives_into_ported_grammar_propertywise(action):
         port_grammar(src, is_lexer=True)
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "BUG (port.py:277): `src.index('/*')` raises ValueError rather than PortError when "
-    "the grammar has no block comment, escaping the port's own error contract. "
-    "build.py catches PortError specifically, so this surfaces as a generic crash."
-))
 def test_port_grammar_missing_license_is_a_port_error():
     """PROPERTY: every rejection from port_grammar is a PortError.
 

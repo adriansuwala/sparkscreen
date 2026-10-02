@@ -550,20 +550,17 @@ class TestReadableNamespaceAllowlist:
         report = screen(sql_call("select * from prod.t"), policy, spec=spec_key)
         assert report.ok
 
-    @pytest.mark.xfail(
-        reason="BUG: policy.py uses `elif self.readable_namespaces`, so when the "
-               "writable check passes the readable check is never reached. A "
-               "table inside writable_namespaces but outside readable_namespaces "
-               "is therefore never objected to, which is the case a policy "
-               "setting both lists is most likely to rely on.",
-        strict=False,
-    )
     def test_both_lists_should_apply_to_destructive_statements(self, spec_key):
         """A table in the writable set but outside the readable set must object.
 
-        This is the case the `elif` in policy.py swallows: `staging.x` passes the
-        writable check, so the branch is taken and `readable_namespaces` is never
-        consulted -- even though `staging.x` is plainly outside `prod.*`.
+        Regression test. policy.py joined the two allowlist checks with `elif`, so
+        whichever fired first ate the other: with `writable_namespaces` set, the
+        readable check was never consulted for a destructive statement. `staging.x`
+        passes the writable check and is plainly outside `prod.*`, yet nothing objected.
+
+        This is the case a policy setting both lists is most likely to rely on --
+        "you may write staging, you may read prod" -- so silently checking only half of
+        it is a policy hole rather than a cosmetic issue.
         """
         base = default_policy()
         policy = Policy(name="both", rules=base.rules,

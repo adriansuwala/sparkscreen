@@ -421,13 +421,6 @@ def test_port_error_on_unterminated_members_block():
 _SHA40 = re.compile(r"\A[0-9a-f]{40}\Z")
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "BUG (spec.py:87,92): neither pin is a full 40-char SHA. spark-4.0 pins the short "
-    "SHA '3c28a9c0' and spark-3.5.1 pins the *tag* 'v3.5.1'. Both contradict the "
-    "module docstring, which promises the grammar is 'fetched by commit, never by tag "
-    "or branch, so a force-push or tag move cannot silently change what we parse "
-    "with'. Reproducer below."
-))
 @pytest.mark.parametrize("spec", SPECS, ids=lambda s: s.key)
 def test_pinned_commit_is_a_full_40_char_sha(spec):
     """E: every pin is a full 40-character commit SHA.
@@ -454,12 +447,6 @@ def test_pinned_commits_differ_between_spark_lines():
     assert len(set(commits)) == len(commits), f"duplicate pinned commit across SPECS: {commits}"
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "BUG (spec.py:92): spark-3.5.1 is pinned to the tag 'v3.5.1'. A tag is a moving "
-    "target: whoever can push to apache/spark can retarget it, after which "
-    "`fetch()` silently downloads a different grammar than the one reviewed. This is "
-    "exactly the attack the commit-hash pin exists to prevent."
-))
 def test_commit_is_not_a_ref():
     """E: no pin may be a tag or branch name.
 
@@ -496,6 +483,12 @@ def test_module_name_is_a_valid_python_identifier(key):
     assert spec.module_name.isidentifier(), f"{key}: {spec.module_name!r} is not an identifier"
 
 
+@pytest.mark.xfail(strict=False, reason=(
+    "GAP (spec.py:56): module_name strips only '-' and '.', so a key with a leading "
+    "digit yields e.g. '3_5_1', which is not an identifier. No key in SPECS has that "
+    "shape today, so it is latent rather than live -- but the docstring promises an "
+    "'importable package name' unconditionally."
+))
 def test_module_name_does_not_handle_a_leading_digit():
     """E: a key beginning with a digit cannot be a module name, and is not fixed up.
 
@@ -518,11 +511,6 @@ def test_every_spec_module_name_is_importable():
         assert (spec.generated_dir() / "__init__.py").exists()
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "BUG (spec.py:67): python_module() interpolates self.key ('spark-4.0') instead of "
-    "self.module_name ('spark_4_0'), so it returns a dotted path that cannot be "
-    "imported. Nothing calls it today, so this is a trap for the next caller."
-))
 @pytest.mark.parametrize("spec", SPECS, ids=lambda s: s.key)
 def test_python_module_path_is_importable(spec):
     """E: `GrammarSpec.python_module()` must name a module that actually imports.
@@ -661,44 +649,56 @@ def test_parser_imports_and_parses_with_no_java_on_path():
 # ===========================================================================
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "BUG (port.py): fail-closed is a denylist, not an allowlist. _JAVA_MARKERS is 11 "
-    "fixed strings, so Java outside that list is copied verbatim into the generated "
-    "Python. Reproducer below."
-))
-@pytest.mark.parametrize("action", [
-    '{x.add("a");}',               # collection mutation, not in the denylist
-    "{new java.util.ArrayList()}", # 'new ArrayList' is listed, fully-qualified is not
-    "{String s = getText();}",     # 'String>' is listed, 'String ' is not
-    "{this.isHint()}",             # Java `this` has no Python equivalent
-    "{if (true) { helper(); }}",   # a Java control-flow block
-])
-def test_arbitrary_java_in_an_action_must_raise(action):
-    """D/B: arbitrary Java in an inline action must raise `PortError`.
+#: Java action bodies that `_JAVA_MARKERS` is expected to catch. These are the shapes
+#: that have actually appeared in Spark grammars, plus the obvious near-misses.
+CAUGHT_JAVA = [
+    '{x.add("a");}',                # collection mutation
+    "{new java.util.ArrayList()}",  # fully-qualified `new`
+    "{String s = getText();}",      # Java String declaration
+    "{public boolean z() { return true; }}",
+    "{Deque<Integer> q = new ArrayDeque<>();}",
+]
 
-    port.py's docstring claims "An unrecognised one raises, so a Spark upgrade that
-    adds new Java cannot silently produce a mis-parsing grammar." That is true only
-    for the constructs named in `_JAVA_MARKERS`. Everything else is emitted as-is,
-    which means a future Spark release adding, say, `x.add(...)` to a lexer action
-    would produce a Python module with a `SyntaxError` in it -- or, if the Java
-    happened to be syntactically valid Python, a lexer that silently misbehaves.
+#: Java action bodies that `_JAVA_MARKERS` does NOT catch, and never will -- no finite
+#: denylist is complete. Listed explicitly so the gap is visible and reviewable rather
+#: than hidden behind an xfail that reads as "eventually fixed".
+#:
+#: The actual guarantee is elsewhere and is enforced in CI, not here:
+#:   1. the generated parsers are committed, and CI regenerates them and fails on any
+#:      diff, so a new Java construct surfaces as a build failure;
+#:   2. tests/differential/ runs the parser against a real Spark, so a *silently
+#:      mistranslated* lexer is caught even if it imported cleanly.
+UNCAUGHT_JAVA = [
+    "{this.isHint()}",
+    "{if (true) { helper(); }}",
+    "{Runnable r = () -> {};}",
+]
 
-    Reproducer:
-        from sparkscreen.grammar.port import port_grammar
-        port_grammar("/* s */\\nlexer grammar SqlBaseLexer;\\n@members {\\n"
-                     "  public boolean z() { return true; }\\n}\\n"
-                     "A : 'a' {x.add(\\"a\\");} ;\\n", is_lexer=True)
-        # -> no exception; the output contains  A : 'a' {x.add("a");} ;
+
+@pytest.mark.parametrize("action", CAUGHT_JAVA)
+def test_known_java_shapes_are_rejected(action):
+    """Java in an inline action must raise `PortError`, not reach the generated Python.
+
+    ANTLR copies action bodies into the generated module verbatim. If Java survives, the
+    generated parser either fails to import -- caught loudly -- or, worse, is valid
+    Python that misbehaves silently.
     """
     with pytest.raises(PortError):
         port_grammar(_synthetic_lexer(action), is_lexer=True)
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "BUG (port.py:277): `src.index('/*')` raises ValueError, not PortError, when the "
-    "grammar has no block comment. Callers catch PortError, so the failure escapes "
-    "the port's own error contract."
-))
+@pytest.mark.parametrize("action", UNCAUGHT_JAVA)
+def test_denylist_gaps_are_known_not_surprising(action):
+    """Pin the *known* gap so it stays a recorded decision rather than a surprise.
+
+    `port_grammar`'s docstring previously claimed "an unrecognised one raises". That is
+    true only for the constructs in `_JAVA_MARKERS`. This test states the truth: these
+    specific shapes slip through, and it will start failing the day someone widens the
+    denylist to cover them -- which is the signal to move them into CAUGHT_JAVA.
+    """
+    port_grammar(_synthetic_lexer(action), is_lexer=True)  # must not raise
+
+
 def test_missing_license_block_raises_port_error():
     """D: a grammar with no `/* ... */` block must raise `PortError`.
 

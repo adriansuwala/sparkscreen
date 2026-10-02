@@ -65,17 +65,32 @@ class GrammarSpec:
         return _GRAMMAR_BASE.format(ref=self.commit, name=name)
 
     def python_module(self, name: str) -> str:
-        return f"sparkscreen.grammar.generated.{self.key}.{name}"
+        """Fully-qualified module name for a generated parser module.
+
+        Uses `module_name`, not `key`: the public key is "spark-4.0", which contains a
+        dot and is not an importable package name. The generated directories are
+        "spark_4_0".
+        """
+        return f"sparkscreen.grammar.generated.{self.module_name}.{name}"
 
 
 # ---------------------------------------------------------------------------
 # The compatibility matrix.
 #
-# spark-4.0  : Spark 5.0.0-SNAPSHOT grammar at commit 3c28a9c0. Largest surface:
-#              dollar-quoted strings, STRUCT<..> type-level counting, single-char
-#              pipe operators, 24 embedded Java constructs.
-# spark-3.5.1: Spark v3.5.1. Older and much smaller grammar (1875 parser lines),
-#              6 embedded Java constructs, no dollar-quoting or pipe operators.
+# Every `commit` MUST be a full 40-character SHA of an immutable Spark commit.
+# This is a supply-chain property, not a style preference: a moving ref -- a branch, or
+# even a tag, which can be re-pointed -- means the grammar that gets parsed with can
+# change under a released version of this package, and the two grammars do not agree
+# (`spark-4.0` accepts `CALL` and `|>`; `spark-3.5.1` rejects them). Two of these were
+# originally a short SHA and a bare `v3.5.1` tag; tests/test_grammar_port.py now
+# enforces the full-SHA invariant so that cannot regress.
+#
+# spark-4.0  : grammar as of 2026-08-03. Largest surface: dollar-quoted strings,
+#              STRUCT<..> type-level counting, single-char pipe operators, CALL,
+#              BEGIN...END scripts, 24 embedded Java constructs.
+# spark-3.5.1: release v3.5.1. Older and much smaller grammar (1875 parser lines),
+#              6 embedded Java constructs, no dollar-quoting, pipe operators, CALL,
+#              or scripts.
 #
 # Both are generated with ANTLR 4.13.1 even though Spark 3.5.1 pins 4.9.3:
 # 4.9.3 rejects that grammar for the Python target (labels `from=`, `input=`,
@@ -85,13 +100,13 @@ class GrammarSpec:
 SPECS: tuple[GrammarSpec, ...] = (
     GrammarSpec(
         key="spark-4.0",
-        commit="3c28a9c0",
+        commit="3c28a9c093f1026d76e53d3eb2b846ffb28465c8",
         spark_versions=("4.0.0", "5.0.0"),
         antlr_version="4.13.1",
     ),
     GrammarSpec(
         key="spark-3.5.1",
-        commit="v3.5.1",
+        commit="fd86f85e181fc2dc0f50a096855acf83a6cc5d9c",
         spark_versions=("3.5.1",),
         antlr_version="4.13.1",
     ),
