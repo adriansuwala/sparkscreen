@@ -133,6 +133,16 @@ way.
 
 ---
 
+## T5b — DataFrame writes: known gap
+
+Shipped in 22ed358. One deliberate limitation: an aliased writer defeats the `save` and
+`jdbc` half. `w = df.write; w.save("s3://x")` is not detected, because the constant folder
+tracks string values and does not model object bindings. `saveAsTable` and `insertInto` are
+unaffected — they match on method name alone, so `w.saveAsTable(...)` is caught.
+
+Recorded rather than guessed at. Fixing it means tracking that a name was bound to a
+`.write` expression, which is a different kind of analysis from the one the folder does.
+
 ## T6 — Should Python-level calls be screened here?
 
 **Status: open. Leaning separate tool.**
