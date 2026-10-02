@@ -1,0 +1,6 @@
+# Third-party grammar sources (Apache-2.0) and the parsers generated from them.
+# These are vendored/generated, not hand-written; mark them so `git blame` and
+# diffs point at the build, not at our edits.
+src/sparkscreen/grammar/vendored/** linguist-generated=true
+src/sparkscreen/grammar/generated/** linguist-generated=true
+*.g4 linguist-generated=true
