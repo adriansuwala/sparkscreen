@@ -252,9 +252,14 @@ Measured, not guessed. All currently return ALLOW with zero findings:
 | `shutil.rmtree("/data")` | Python-level |
 | `os.system("rm -rf /")` | Python-level |
 
-`Reason.PYTHON_DANGEROUS_CALL` is defined in the enum and **never raised** — a reason we
-never emit, advertising capability we do not have. Tracked in
-[roadmap](roadmap.md#blind-spot-work).
+`Reason.PYTHON_DANGEROUS_CALL` was defined in the enum and **never raised** — a reason we
+never emitted, advertising capability we did not have. Removed 2026-10-02
+(`sparkscreen-znf`): the coverage is out of scope, and a dead enum member implies it
+exists. Python screening is a separate tool ([T4](threads.md#t4--pluggable-operation-cataloques),
+[T6](threads.md#t6--should-python-level-calls-be-screened-here)).
+
+The lesson generalises: **an enum is a promise about what the code can produce.** A
+member that is never emitted makes the tool look more capable than it is.
 
 ---
 

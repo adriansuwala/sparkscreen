@@ -195,9 +195,17 @@ find out whether the new grammar behaves the way you assumed.
 `report.analysis_failures` separates "we could not look" from "we looked and it is outside
 policy" — useful if you are tuning how noisy your gate is.
 
-**Seeing `UNKNOWN` on `DELETE`/`UPDATE`/`MERGE`.** Correct and intentional. They parse
-fine; they are flagged because you should confirm the `WHERE` clause. Restructure as
-`INSERT OVERWRITE` into a staging table and swap, if you want them auto-approved.
+**Seeing `UNKNOWN` on `DELETE`/`UPDATE`/`MERGE`.** Correct and intentional, and the
+`WHERE` clause does not exempt them. Any statement that removes rows carries
+`DESTROY_DATA` and needs a human, whether it removes one record or a million.
+
+That is deliberate: the screener is not asked whether a particular `DELETE` is harmful,
+only whether a person should look. A `DELETE ... WHERE id = 3` still removes a record,
+and an auto-approval is a decision someone will rely on. If you want routine cleanup to
+pass, allow it by namespace or by rule — don't expect narrow predicates to earn it.
+
+To avoid the flag entirely, restructure as `INSERT OVERWRITE` into a staging table and
+swap, which is atomic and recoverable from the staging copy.
 
 ---
 

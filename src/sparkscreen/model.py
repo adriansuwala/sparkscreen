@@ -132,7 +132,14 @@ class Reason(str, Enum):
     DESTRUCTIVE_STATEMENT = "destructive_statement"
     OUTSIDE_ALLOWLIST = "outside_allowlist"
     CODE_LENGTH_EXCEEDED = "code_length_exceeded"
-    PYTHON_DANGEROUS_CALL = "dangerous_python_call"
+
+    # There is deliberately no PYTHON_DANGEROUS_CALL here. One existed and was never
+    # raised, which meant the enum advertised screening of os.system / shutil.rmtree /
+    # dbutils.fs.rm that the tool does not do -- worse than absence, because a reader
+    # would reasonably assume the coverage existed. Removed 2026-10-02
+    # (sparkscreen-znf): Python-level call screening is out of scope, the target
+    # environment is an ephemeral pod, and the expensive failures there are wrong
+    # warehouse writes, which the spark.sql() path already covers.
 
     # UNKNOWN -- the interesting half
     UNPARSEABLE_SQL = "unparseable_sql"

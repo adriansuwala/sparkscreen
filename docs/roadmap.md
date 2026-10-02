@@ -82,13 +82,18 @@ Effect is determinate; only the target may be unresolved
 observes the real effect of each write against a scratch warehouse. Converting that probe
 into assertions is the natural first step.
 
-### 3. `dbutils` and Python-level calls — ~2h
+### 3. ~~`dbutils` and Python-level calls~~ — closed as out of scope
 
-`dbutils.fs.rm(..., recurse=True)` and friends. Also wires
-`Reason.PYTHON_DANGEROUS_CALL`, which is currently defined and never raised — a reason we
-never emit advertises capability we do not have.
+`sparkscreen-znf`, decided 2026-10-02. `dbutils.fs.rm`, `shutil.rmtree` and
+`os.system` remain unscreened **by decision**. The unused
+`Reason.PYTHON_DANGEROUS_CALL` was deleted rather than wired, so the enum no longer
+advertises coverage that does not exist.
 
-Whether this belongs in this tool at all is [T6](threads.md#t6--should-python-level-calls-be-screened-here).
+Rationale: the target environment is an ephemeral pod, where the expensive failure is a
+wrong write to a warehouse that belongs to someone else — and the `spark.sql()` path
+already covers that. Python screening is a separate tool
+([T4](threads.md#t4--pluggable-operation-cataloques),
+[T6](threads.md#t6--should-python-level-calls-be-screened-here)).
 
 ### 4. Interprocedural constant propagation — ~4h
 

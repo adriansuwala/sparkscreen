@@ -106,13 +106,24 @@ SHARED_CORPUS = [
     # starting with "SET".
     ("set catalog mycat", frozenset()),
 
-    # -- row writes that preserve data ---------------------------------------
+    # -- row writes ----------------------------------------------------------
+    # INSERT adds rows and takes none away, so it is the plain-write case.
     ("insert into prod.users select 1", {Effect.WRITE_DATA}),
     ("insert into prod.users partition (a = 1) select 1", {Effect.WRITE_DATA}),
-    ("update prod.users set a = 1 where b = 2", {Effect.WRITE_DATA}),
-    ("delete from prod.users where a = 1", {Effect.WRITE_DATA}),
+    # UPDATE / DELETE / MERGE also DESTROY_DATA. The WHERE clause does not earn an
+    # exemption -- `delete from prod.users where a = 1` still removes a user's record,
+    # and DESTROY_DATA is here as a deliberate slowdown flag rather than a damage
+    # estimate (sparkscreen-120). Bounded and unbounded forms are both listed so the
+    # lack of a predicate-sensitivity is explicit rather than accidental.
+    ("update prod.users set a = 1 where b = 2",
+     {Effect.WRITE_DATA, Effect.DESTROY_DATA}),
+    ("delete from prod.users where a = 1",
+     {Effect.WRITE_DATA, Effect.DESTROY_DATA}),
+    ("delete from prod.users",
+     {Effect.WRITE_DATA, Effect.DESTROY_DATA}),
     ("merge into prod.users using src on prod.users.id = src.id "
-     "when matched then update set prod.users.a = src.a", {Effect.WRITE_DATA}),
+     "when matched then update set prod.users.a = src.a",
+     {Effect.WRITE_DATA, Effect.DESTROY_DATA}),
 
     # -- schema changes that preserve data -----------------------------------
     # These are the "fine in staging, review in prod" tier: structure changes, rows
@@ -240,9 +251,15 @@ CLASSIFICATION_CASES = [
     ("alter table prod.users drop column a",
      {Effect.DESTROY_DATA, Effect.WRITE_SCHEMA}, frozenset()),
     # INSERT (not overwrite) is a row write only. This is the other half of the
-    # TRUNCATE contrast.
+    # TRUNCATE contrast, and the reason DELETE is treated differently despite both
+    # being "row writes": INSERT cannot remove what is already stored.
     ("insert into prod.users select 1",
      {Effect.WRITE_DATA}, {Effect.DESTROY_DATA}),
+    # DELETE is the other half. The required/forbidden split is what pins the
+    # asymmetry from both directions -- asserting DELETE *has* DESTROY_DATA alone
+    # would still pass if some later edit also made it a schema change.
+    ("delete from prod.users where a = 1",
+     {Effect.WRITE_DATA, Effect.DESTROY_DATA}, {Effect.WRITE_SCHEMA}),
     # ADD JAR: arbitrary code execution, no schema change, no data change.
     ("add jar /tmp/evil.jar",
      {Effect.LOAD_CODE}, {Effect.DESTROY_DATA, Effect.WRITE_SCHEMA}),
@@ -610,14 +627,43 @@ class TestDenyRegardlessOfNamespace:
                 f"{label} should be reviewable, not forbidden"
 
     def test_write_data_alone_does_not_qualify(self):
-        # INSERT INTO a namespace you are allowed to write is normal ETL.
+        # INSERT INTO a namespace you are allowed to write is normal ETL, so a plain
+        # row-write does not justify denying regardless of namespace.
         assert not denies_regardless_of_namespace({Effect.WRITE_DATA})
         assert not denies_regardless_of_namespace(
             effects_for_label("InsertIntoTable"))
+        # UPDATE/DELETE/MERGE used to be asserted here too. They no longer qualify,
+        # because they now carry DESTROY_DATA (sparkscreen-120) -- see
+        # `test_row_deleting_statements_qualify` for the replacement, which asserts
+        # the stronger property rather than deleting the coverage.
+
+    def test_row_deleting_statements_qualify(self):
+        """UPDATE / DELETE / MERGE deny regardless of namespace. Decided in
+        sparkscreen-120, and it overrides the earlier reasoning that they are "bounded
+        by their WHERE clause".
+
+        The argument for it is not that these statements are always catastrophic -- a
+        `DELETE FROM t WHERE id = 3` is not -- but that DESTROY_DATA here is a
+        deliberate slowdown flag. The screener must never certify a row-deleting
+        statement as harmless, because "harmless" is a conclusion someone would act on,
+        and a user's record removed on the strength of that analysis is exactly the
+        outcome the tool exists to prevent. The cost is that routine cleanup DELETEs
+        need an explicit policy allowance, which is the intended price.
+        """
+        for label in ("UpdateTable", "DeleteFromTable", "MergeIntoTable"):
+            effects = effects_for_label(label)
+            assert Effect.DESTROY_DATA in effects, (
+                f"{label} removes rows and must not be certifiable as harmless"
+            )
+            assert Effect.WRITE_DATA in effects, f"{label} is also a row write"
+            assert denies_regardless_of_namespace(effects), label
+
+    def test_insert_into_does_not_qualify(self):
+        # The counterweight to the test above, and the reason the two are separate.
+        # INSERT does not remove what is already there, so it stays reviewable rather
+        # than forbidden -- otherwise every ETL pipeline would need an exemption.
         assert not denies_regardless_of_namespace(
-            effects_for_label("UpdateTable"))
-        assert not denies_regardless_of_namespace(
-            effects_for_label("MergeIntoTable"))
+            effects_for_label("InsertIntoTable"))
 
     def test_read_only_does_not_qualify(self):
         assert not denies_regardless_of_namespace(
@@ -920,10 +966,15 @@ class TestWiring:
         assert {r.value for r in Reason} >= {
             "no_matching_rule", "within_allowlist", "deny_rule",
             "destructive_statement", "outside_allowlist", "code_length_exceeded",
-            "dangerous_python_call", "unparseable_sql", "unresolved_dynamic_sql",
+            "unparseable_sql", "unresolved_dynamic_sql",
             "unsupported_statement", "resource_limit", "unsupported_spark_version",
             "analysis_error",
         }
+        # `dangerous_python_call` was here and is deliberately gone. A Reason that is
+        # declared but never raised advertises screening the tool does not perform, and
+        # a reader of the enum would reasonably assume the coverage existed
+        # (sparkscreen-znf). Python-level call screening is out of scope.
+        assert "dangerous_python_call" not in {r.value for r in Reason}
         assert len(list(Verdict)) == 3, "a fourth verdict appeared"
 
     def test_screen_module_does_not_import_policy_from_effects(self):

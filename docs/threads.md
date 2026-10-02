@@ -145,8 +145,11 @@ blast radius of `rm -rf /` is a pod that is already disposable. The expensive fa
 that environment are wrong writes to a warehouse that belongs to someone else, which is
 the *Spark* problem, not the Python problem.
 
-Argument for keeping it in: a general Python screener is useful for local code review, and
-`Reason.PYTHON_DANGEROUS_CALL` already exists in the enum, never raised.
+Argument for keeping it in: a general Python screener is useful for local code review.
+
+**Decided 2026-10-02** (`sparkscreen-znf`): out of scope for this tool, and the
+never-raised `Reason.PYTHON_DANGEROUS_CALL` was deleted so the enum stops implying
+otherwise.
 
 **Recommendation:** keep the Spark tool Spark-shaped, and build Python screening as a
 separate tool that consumes the same `Effect`/`Confidence` vocabulary ([T4](#t4--pluggable-operation-cataloques)).

@@ -177,20 +177,32 @@ LABEL_EFFECTS: dict[str, frozenset[Effect]] = {
                                   Effect.REACHES_EXTERNAL),
     "InsertOverwriteDir": _e(Effect.WRITE_DATA, Effect.DESTROY_DATA,
                               Effect.REACHES_EXTERNAL),
-    # UPDATE and DELETE mutate rows in place. Not DESTROY_DATA: both are bounded by
-    # their WHERE clause and neither removes the table. An unbounded
-    # `DELETE FROM prod.users` is catastrophic in practice, but what it destroys is
-    # decided by the predicate, not by the statement label -- and the effect axis
-    # describes the statement. A caller who wants "could this lose everything" needs
-    # the WHERE clause, which is a future refinement, not a different flag here.
-    "UpdateTable": _e(Effect.WRITE_DATA),
-    "DeleteFromTable": _e(Effect.WRITE_DATA),
+    # UPDATE, DELETE and MERGE all carry DESTROY_DATA.
+    #
+    # The earlier reasoning here was "both are bounded by their WHERE clause, and what
+    # they destroy is decided by the predicate rather than the label". That is true, and
+    # it is the wrong question for this axis. Decided 2026-10-02 (sparkscreen-120).
+    #
+    # The screener is not asked whether a particular DELETE is harmful -- a
+    # `DELETE FROM t WHERE id=3` removes a record, and the fact that the record is one
+    # row rather than a million is not the same as it being safe. The tool's job is to
+    # decide whether a human needs to look, and if the screener concludes "harmless"
+    # because the statement looked narrow, then a user's record can be removed on the
+    # strength of that analysis being wrong.
+    #
+    # So DESTROY_DATA here is a deliberate slowdown flag, not a damage estimate. It says
+    # "rows are removed and a person should carry that out deliberately". Policy may
+    # still auto-approve it in a sandbox namespace; the point is that the default answer
+    # is not ALLOW, and no amount of narrowness in the predicate should produce one.
+    # The cost is that routine cleanup DELETEs need an explicit policy allowance. That
+    # is the intended price.
+    "UpdateTable": _e(Effect.WRITE_DATA, Effect.DESTROY_DATA),
+    "DeleteFromTable": _e(Effect.WRITE_DATA, Effect.DESTROY_DATA),
     # MERGE can insert, update *and* delete in one statement (WHEN NOT MATCHED THEN
-    # INSERT / WHEN MATCHED THEN DELETE). It is categorised as a row write rather
-    # than a destroyer for the same reason as DELETE: the DELETE branch is
-    # conditional and clause-bounded. Worst case it writes and destroys, and
-    # WRITE_DATA is the flag a policy keys on for "a human should read the clauses".
-    "MergeIntoTable": _e(Effect.WRITE_DATA),
+    # INSERT / WHEN MATCHED THEN DELETE). Same reasoning as DELETE, and the strongest
+    # case of the three: a single MERGE can delete rows in one branch and insert them in
+    # another, so its blast radius is not visible from the label at all.
+    "MergeIntoTable": _e(Effect.WRITE_DATA, Effect.DESTROY_DATA),
 
     # -- irreversible loss ---------------------------------------------------
     # DROP TABLE removes the table and everything in it. No WHERE-clause caveat, no

@@ -231,3 +231,68 @@ on branches, parallel work on `git worktree`s with one agent per worktree.
 Not stylistic: concurrent agents editing adjacent files caused real conflicts in
 `tests/test_screen_policy.py` twice, which had to be unpicked by hand. See
 `CONTRIBUTING.md`.
+
+---
+
+## D15 — `DESTROY_DATA` on `DELETE`/`UPDATE`/`MERGE` is a slowdown flag, not a damage estimate
+
+**Accepted** (`sparkscreen-120`, 2026-10-02). Reverses the table's original reasoning.
+
+The table first classified `UPDATE`/`DELETE`/`MERGE` as `WRITE_DATA` only, on the
+grounds that "both are bounded by their `WHERE` clause, and what they destroy is decided
+by the predicate rather than the label." That reasoning is true and it answers the wrong
+question.
+
+A screener is not asked whether a particular `DELETE` is harmful. It is asked whether a
+person needs to look. `DELETE FROM t WHERE id = 3` removes a record, and one row is not
+the same thing as safe — so if the screener can certify it as harmless, a user's record
+can be removed on the strength of an analysis that turned out to be wrong. That is the
+exact failure this project exists to prevent, and it does not matter that the statement
+looked narrow.
+
+So `DESTROY_DATA` here means "rows are removed and a person should carry that out
+deliberately", not "this will lose a lot". Policy may still auto-approve a `DELETE` in a
+sandbox namespace. The cost is that routine cleanup needs an explicit allowance, and that
+is the intended price.
+
+`INSERT INTO` deliberately stays `WRITE_DATA` — it cannot remove what is stored, so
+`test_insert_into_does_not_qualify` pins the asymmetry and gives the rule a counterweight
+rather than letting it widen silently.
+
+**Generalisable:** a classifier should answer the question its consumer will ask. Asking
+"is this harmful?" invites a proportionate answer and returns ALLOW too often; asking
+"does a human need to look?" returns something safe to gate on. The tool's output is read
+by a person deciding whether to press go, so the second question is the one that matters.
+
+---
+
+## D16 — a never-emitted `Reason` is a defect
+
+**Accepted** (`sparkscreen-znf`, 2026-10-02).
+
+`Reason.PYTHON_DANGEROUS_CALL` existed and was never raised. Deleted rather than wired:
+Python-level call screening is out of scope (target environments are ephemeral pods, where
+the expensive failure is a wrong warehouse write — which the `spark.sql()` path covers),
+and the honest options were to implement it or stop implying it.
+
+An enum is a promise about what the code can produce. A member that never appears in
+output makes the tool look more capable than it is, which is the same confident-wrong-
+answer hazard as everything else in [findings](findings.md). The rule generalises: if you
+cannot name a test that emits a value, it does not belong in the enum.
+
+---
+
+## D17 — keep the over-approximation when the false positive is cheaper
+
+**Accepted** (`sparkscreen-r50`, 2026-10-02).
+
+`LOAD DATA INPATH` and `LOAD DATA LOCAL INPATH` share the `LoadData` label, so
+`READ_LOCAL_FS` fires on both. The precise fix is keying on `(label, local)` from the
+parse tree. We keep the approximation.
+
+The bias is what matters: the canonical attack is `LOAD DATA LOCAL INPATH '/etc/passwd'`,
+so the direction that errs toward *not* flagging is the one we must not take. One false
+positive on the non-LOCAL form is a cheaper error than one false negative on the LOCAL
+form, and the flag can be waived in policy. Precise-but-fail-open would be the wrong
+trade for a security tool; "don't fragment the flags into too many pieces" is the same
+instinct stated more generally.
