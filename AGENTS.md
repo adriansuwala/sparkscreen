@@ -70,7 +70,7 @@ SQLite DB and will silently disagree with a hand-edited JSONL.
 ## Current state (2026-10-03)
 
 - 0.8.0 — pre-1.0; see `sparkscreen.VERSION_NOTES` for why
-- 2,593 tests passing, 17 skipped, 8 xfailed (all documented gaps)
+- 2,929 tests passing, 17 skipped, 8 xfailed (all documented gaps)
 - 51 differential expectations against live Spark 3.5.1
 - 122 statement labels mapped to `Effect` flags across both pinned grammars
 - ~12 ms for a 20-statement file, warm (`python scripts/bench.py`)

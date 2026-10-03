@@ -76,9 +76,12 @@ pages someone about a parser bug or buries a real review.
   return `ALLOW` with zero findings — out of scope by decision, because the expensive
   failure in an ephemeral pod is a wrong write to a warehouse someone else owns, which is
   the Spark problem this tool solves.
-- **Constants are not threaded through function bodies.** `def run(t): spark.sql(f"drop
-  table {t}")` is `UNKNOWN` even when every caller passes a literal. Correct, and noisy on
-  heavily-factored code.
+- **Only literal-call-site parameters and literal-loop elements resolve.** `def run(t):
+  spark.sql(f"drop table {t}")` is `DENY` when every call site in the file passes a literal
+  and all of them agree, and `for t in ["prod.users"]` is unrolled. Recursion, decorators,
+  generators, methods, `*args`/`**kwargs`, nested calls like `drop(h("x"))`, and call sites
+  that disagree are all still `UNKNOWN`. A function resolved from its visible call sites is
+  analysed per-file: a caller in another module is out of reach, so its statement is missed.
 
 The full, measured list is in [findings](docs/findings.md#known-blind-spots).
 

@@ -285,7 +285,7 @@ swap, which is atomic and recoverable from the staging copy.
 ## Known limitations
 
 - DataFrame API writes are not detected (above) — the largest gap.
-- No interprocedural constant propagation: `def run(tbl): spark.sql(f"...")` is `UNKNOWN`
+- Interprocedural constants resolve only from literal call sites that all agree, and loops unroll only over literal lists and tuples. Recursion, decorators, generators, methods, `*args`/`**kwargs`, and disagreeing call sites stay `UNKNOWN`
   even when every caller passes a literal.
 - Grammar permissiveness is not Spark semantics. `BailErrorStrategy` blocks syntax
   recovery, but Spark applies further checks after parsing.

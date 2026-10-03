@@ -22,10 +22,10 @@ What we already do is a static approximation of this: we resolve as much as we c
 statically, and where we cannot, we report UNKNOWN rather than guessing. The gap is that
 we give up per-sink rather than resolving the whole program.
 
-What would actually close it is interprocedural constant propagation — `def run(tbl):
-spark.sql(f"drop table {tbl}")` is UNKNOWN today even when every caller passes a literal.
-That is the cheap, high-value version of this idea and needs no execution at all. See
-[roadmap](roadmap.md#blind-spot-work).
+The cheap, high-value version of this idea was interprocedural constant propagation, and it
+shipped: `def run(tbl): spark.sql(f"drop table {tbl}")` is now `DENY` when every call site in
+the file passes a literal and all of them agree, and `for t in ["a","b"]` unrolls. No
+execution, no shim. What remains open is the execution-dependent rows further down.
 
 **Would change our mind** if interprocedural propagation proves too noisy to be worth it;
 a bounded symbolic execution would be the fallback.
@@ -171,6 +171,45 @@ Remaining gap: a writer bound inside an `if` body loses its binding at the branc
 the two-arm form still reports ALLOW for `save`/`jdbc`. Recorded as
 [F16](findings.md#f16--a-writer-bound-in-both-arms-of-an-if-loses-its-binding-savejdbc-report-allow).
 
+## Interprocedural folding — DONE (`e8e27d9`)
+
+`def drop(t): spark.sql(f"DROP TABLE {t}")` called as `drop("prod.users")` is now `DENY`, and
+`for t in ["prod.users", "prod.orders"]` unrolls to two sinks. No execution, no shim.
+
+**Bound parameters** when every call site in the file passes a literal, all sites agree on
+every parameter's value and type, any default is a literal, the name is nowhere else bound at
+module scope, and no call site sits inside the body. All-or-nothing per function.
+
+**Unrolled loops** over a literal list or tuple: single plain `Name` target, every element
+folding (one unknown element poisons the iterable), and no loop, `break`, `continue`,
+`return` or `yield` in the body so the iteration count really is the element count.
+
+Caps: `MAX_LOOP_UNROLL = 32` per loop, `MAX_UNROLL_TOTAL = 256` per module — nested literal
+loops multiply, so the per-loop cap alone is not a work bound. Over-cap is all-or-nothing:
+the whole loop reports `UNKNOWN`. Truncating would report a prefix and say nothing about the
+rest, which is the false ALLOW.
+
+One syntactic sink can now yield several entries, so sinks accumulate per call during the
+walk and reconcile afterwards. Agreeing executions collapse to one; disagreeing ones get one
+entry per distinct statement the code really issues; a sink that both resolved and failed is
+poisoned to `UNKNOWN` rather than picking a winner.
+
+**Not resolved:** recursion and mutual recursion, decorators, `async def`, generators (the
+body does not run at the call — an oracle caught this being assumed), methods, nested defs,
+uncalled functions, `*args`/`**kwargs`, non-literal defaults, `f(g("x"))`, non-literal
+iterables, loop bodies with loop control, and disagreeing call sites.
+
+**Fixed along the way:** parameter binding exposed a pre-existing fail-open where a rebinding
+inside a nested block (`del t`, `t = input()`, `import t`, match capture, `except ... as`,
+`with ... as`, `+=`, walrus, loop target) only touched the block's child frame, so the
+enclosing constant survived — `t = "prod.a"` / `if c: del t` / `DROP {t}` reported
+`DROP prod.a`, a confident DROP for a statement that cannot execute. 14 shapes verified
+broken before the fix. Invalidation now reaches the frame holding the binding and stops at
+scope boundaries, so a function body still cannot unbind a module name.
+
+**Known trade:** resolution is per-file. A function resolved from its local call sites and
+also called elsewhere with a different argument reports only the local statement.
+
 ## T6 — Should Python-level calls be screened here?
 
 **Status: open. Leaning separate tool.**
@@ -215,13 +254,13 @@ control flow, and closure resolution that we currently approximate.
 | `spark.sql("DROP TABLE prod.t")` | DENY — recovered |
 | `t="prod.t"` + f-string | DENY — recovered |
 | `def d(t): spark.sql(f"DROP TABLE {t}")` then `d("prod.t")` | UNKNOWN |
-| `for t in ["a","b"]: spark.sql(f"DROP TABLE {t}")` | UNKNOWN |
+| `for t in ["a","b"]: spark.sql(f"DROP TABLE {t}")` | DENY — resolved by static unrolling, no execution |
 | `"".join(... for t in [...])` | UNKNOWN |
 | `M["drop"]` | UNKNOWN |
 | `input()` | UNKNOWN (correctly — unresolvable in principle) |
 
-Execution collapses rows 3–5 to DENY. That is the entire "interprocedural folding" work
-item, and it gets it for free and completely.
+Execution collapses rows 3–5 to DENY. Row 2 turns out to be reachable statically too, which
+is why it shipped without any of this. Rows 3–5 still need the kernel.
 
 **Why not as the primary path.** Three reasons, in order of weight.
 

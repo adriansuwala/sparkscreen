@@ -334,7 +334,7 @@ Measured, not guessed. All of these currently return ALLOW with zero findings:
 | `dbutils.fs.rm("/", recurse=True)` | Python-level, deliberately out of scope |
 | `shutil.rmtree("/data")` | Python-level, out of scope |
 | `os.system("rm -rf /")` | Python-level, out of scope |
-| interprocedural constants (`def run(t): spark.sql(f"drop table {t}")`) | folding is intra-procedural by design; reported UNKNOWN, never guessed |
+| interprocedural constants (`def run(t): spark.sql(f"drop table {t}")`) | function parameters are bound when every call site in the file passes a literal and all of them agree, and `for` loops over a literal list or tuple are unrolled; anything else (recursion, decorators, generators, methods, kwargs, disagreeing callers) is UNKNOWN, never guessed |
 | SQL arriving as a parameter rather than a literal | same — UNKNOWN |
 
 The DataFrame rows that used to sit at the top of this table
@@ -389,8 +389,9 @@ still unknown until someone reads what the tool says about hangs.
 ## F16 — a writer bound in both arms of an `if` loses its binding; `save`/`jdbc` report ALLOW
 
 Found while verifying T5b with a probe that deliberately did not go through the code under
-test. Recorded here rather than fixed, because the fix is in `folding.py` and the
-interprocedural-folding agent is working in that file in a parallel worktree.
+test. Still open: the branch merge in `folding.py` discards a binding established inside a
+branch body, and interprocedural folding did not change that (it adds resolution, not
+merge semantics).
 
 ## Reproducer
 
@@ -455,6 +456,11 @@ Then add the reproducer as a regression test asserting both directions: arms agr
 The failure mode to avoid is fixing this by reporting `UNKNOWN` for every unresolved writer.
 T5b deliberately leaves an unresolved alias silent so ordinary agent code does not drown in
 findings. The fix belongs in the merge, not in the reporting.
+
+Related: interprocedural folding resolves a function from the call sites *visible in the
+file*. A function resolved here and also called from another module with a different
+argument will report only the statement its local callers issue. Same per-file limitation,
+same trade.
 
 ## What the probe got wrong first
 

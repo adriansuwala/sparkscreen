@@ -150,9 +150,27 @@ df.write.mode("overwrite").saveAsTable("prod.events_v2")
         rep = screen(snippet)
         check(f"out of scope: {snippet[:34]!r}", (rep.verdict, len(rep.findings)),
               (Verdict.ALLOW, 0))
-    check("interprocedural is still UNKNOWN",
+    # Interprocedural folding now resolves literal call sites and literal loops. Pin both
+    # directions: the resolution, and the refusals that must stay UNKNOWN. A verifier that
+    # only checks the happy path would not have caught this function going stale.
+    check("interprocedural: literal call site resolves",
           screen('def run(t):\n    spark.sql(f"drop table {t}")\nrun("prod.t")').verdict,
-          Verdict.UNKNOWN)
+          Verdict.DENY)
+    check("interprocedural: literal loop unrolls",
+          screen('for t in ["prod.users"]:\n    spark.sql(f"drop table {t}")').verdict,
+          Verdict.DENY)
+    for label, snippet in [
+        ("disagreeing callers",
+         'def run(t):\n    spark.sql(f"drop table {t}")\nrun("prod.a")\nrun("prod.b")'),
+        ("recursion",
+         'def a(t):\n    b(t)\ndef b(t):\n    spark.sql(f"drop table {t}")\na("prod.a")'),
+        ("kwargs", 'def run(*a, **k):\n    spark.sql(f"drop table {a[0]}")\nrun("prod.t")'),
+        ("generator body does not run",
+         'def run(t):\n    spark.sql(f"drop table {t}")\n    yield 1\nlist(run("prod.t"))'),
+        ("nested call argument",
+         'def h(x):\n    return x\ndef run(t):\n    spark.sql(f"drop table {t}")\nrun(h("prod.t"))'),
+    ]:
+        check(f"interprocedural refuses: {label}", screen(snippet).verdict, Verdict.UNKNOWN)
 
     # --- the two-env split the README tells people to use ---
     fast = subprocess.run([str(ROOT / ".venv/bin/python"), "-c", "import pyspark"],
