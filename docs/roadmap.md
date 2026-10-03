@@ -140,28 +140,50 @@ tell you whether it agrees with the engine. The version-specific corpus entries
 (`VERSION_SPECIFIC`, `VERSION_SPECIFIC_REJECTED`) are where the expected differences go —
 do not put a 4.0-only statement in the shared corpus.
 
-### Mutation testing — running
+### Mutation testing — done, three survivors recorded
 
 Agreed and in progress. The argument is exactly your framing: this tests the tests.
 For a screener the mutation that matters is `DENY` -> `ALLOW`, and no amount of coverage
 finds it, because the line still executes — it just returns the wrong answer.
 
 ```bash
-.venv/bin/mutmut run       # policy / model / screen / treewalk, ~790 mutants
-.venv/bin/mutmut results   # survivors = assertions that do not bite
+.venv/bin/python scripts/mutate.py            # ~244 mutants over the decision logic
+.venv/bin/python scripts/mutate.py --dry-run  # count without running
+.venv/bin/python scripts/mutate.py --module model.py
 ```
 
-Roughly 790 mutants at ~50s per full-suite run. **Expect hours, not minutes.** A survivor
-in `model.py` or `policy.py` is a real screener bug; a survivor in `screen.py` is the
-expensive kind, since that is the aggregation path that has already produced one
+244 mutants, ~2 min with per-module test selection (4 workers). The earlier estimate of
+790 came from a rough AST count taken before the real enumerator existed, and predates
+mutmut being abandoned.
+
+A survivor in `model.py` or `policy.py` is a real screener bug; a survivor in `screen.py`
+is the expensive kind, since that is the aggregation path that has already produced one
 production bug (F1). The next extensions are `folding.py` and `calls.py`, which decide
 what SQL gets screened at all.
 
 Read it as a *measurement*, not a gate: a high survivor count in a module means its
 tests need strengthening, not that the module is wrong.
 
-`mutmut-config.toml` exists and is scoped to the decision logic rather than the grammar
-port. Worth a real run to find assertions that do not bite.
+Superseded by `scripts/mutate.py`, which replaced `mutmut` (it deadlocked at this scale)
+and additionally subsets tests per mutant. 244 mutants over the decision logic; 113 of
+the 117 applicable were killed. It found four real gaps, all now fixed and tested:
+an entirely unasserted public API (`has_effect`), and the `>` vs `>=` boundary on all
+four resource limits.
+
+**Three survivors remain**, all in the DataFrame path and all recorded rather than fixed:
+
+| site | mutation | why it survives |
+|---|---|---|
+| `screen.py:201` | `target_known and target` -> `or` | an unknown target would be reported as known |
+| `screen.py:255` | `if readable_namespaces` -> `if not` | the check would run with no allowlist configured |
+| `screen.py:368` | `f.verdict is wanted` -> `is not` | `_combine` could pick the wrong primary finding |
+
+Each needs a test written deliberately against real behaviour rather than inferred from
+the mutation. That is the next piece of work.
+
+Not yet covered: `folding.py` and `calls.py`. They decide *what SQL gets screened at
+all*, so a survivor there is the expensive kind. Extending them is mechanical — add the
+module to `MODULE_TESTS` and pick the tests that guard it.
 
 ### Publishing — ~1h, no new code
 
@@ -170,11 +192,6 @@ grammar pairs. What is missing is the boring part: a real version number (it is 
 `0.1.0`), a `LICENSE`/author block check, a tagged release, and PyPI credentials. This is
 the shortest path from "works on my machine" to "installable", and it is the only item
 here that is not blocked on a design question.
-
-`mutmut-config.toml` exists and is scoped to the decision logic rather than the grammar
-port. Worth a real run to find assertions that do not bite.
-
----
 
 ## Explicitly not doing
 

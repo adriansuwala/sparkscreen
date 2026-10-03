@@ -79,9 +79,12 @@ screener raises. An assertion that cannot fail is worse than no test.
 ## Mutation testing
 
 ```bash
-.venv/bin/mutmut run      # policy/model/screen/treewalk
-.venv/bin/mutmut results  # survivors = assertions that do not bite
+.venv/bin/python scripts/mutate.py   # ~244 mutants over the decision logic
+.venv/bin/python scripts/mutate.py --module model.py
 ```
+
+Use this, **not** `mutmut run`: mutmut 3.8.0 deadlocks on this project at scale, and it
+cannot subset tests per mutant, which is the actual cost driver.
 
 Scoped to decision logic on purpose. A survivor in `model.py` is a screener bug that could
 turn `DENY` into `ALLOW` — exactly the thing coverage cannot see, because the line still

@@ -54,8 +54,18 @@ say which claim and why it was wrong.
 
 ```bash
 pytest tests/ -q                        # fast suite; must pass before pushing
-mutmut run                              # mutation testing
+python scripts/mutate.py               # mutation testing; --dry-run to count first
+python scripts/mutate.py --module model.py   # one module, ~1 min
 ```
+
+Mutation testing is not optional for a change to `policy.py`, `model.py`, `screen.py` or
+`treewalk.py` — those decide verdicts. It has caught real gaps that 2,500 tests could not,
+including an untested public API and an off-by-one on a limit boundary. Survivors are a
+measurement, not a failure: read them and decide whether the code is unreachable or the
+test is too weak.
+
+This replaces `mutmut`, which deadlocked on this project at scale. See the rationale at
+the top of `scripts/mutate.py`.
 
 Differential tests need a real engine and are opt-in:
 
