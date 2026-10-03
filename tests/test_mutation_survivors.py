@@ -701,6 +701,24 @@ SURVIVORS_NOT_COVERED = {
     #    severity resolves to the same value either way.
     "policy.x_policy_from_dict__mutmut_22":
         "deleting `severity=` matches Finding's own MEDIUM default.",
+    # -- declined, killable only by pinning wording: mutmut_9 (max_targets branch) and
+    #    mutmut_22 (max_literals branch) rewrite `message=<f-string>` to `message=None`.
+    #    `Finding.message` is typed `str`, so this installs a type-violating value: the
+    #    finding still constructs with the correct verdict, reason, line, sql and
+    #    statement, and the only observable difference is `.message`.
+    #
+    #    A test *could* kill these by asserting the message text. I am not writing one,
+    #    because asserting exact wording pins text that is not behaviour -- it fails
+    #    when someone improves a message and passes when a real regression leaves the
+    #    wording identical. The honest options are to leave them unclaimed, or to pin
+    #    the wording deliberately and say so. Recorded here so the choice is visible
+    #    rather than implied by silence.
+    #
+    #    Note this is NOT the same as the mutmut_22 above: that one deletes `severity=`
+    #    and is genuinely equivalent, whereas this one assigns `None` and is a real
+    #    (if shallow) defect. Two mutants, same number, different functions.
+    "policy.xǁPolicyǁevaluate_statement__mutmut_9/22":
+        "message=None; killable only by asserting exact wording, which pins non-behaviour.",
     # -- killed by a crash, not by an assertion. `_e` is reachable, but `frozenset(None)`
     #    raises TypeError the moment LABEL_EFFECTS is built at import, so the mutant dies
     #    before any test body runs. Distinct from "unreachable": here the code genuinely

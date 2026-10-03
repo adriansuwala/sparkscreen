@@ -187,8 +187,24 @@ class TestFindingsCarryTheirProvenance:
     def test_a_resource_limit_finding_carries_where_it_was_triggered(self, spec_key):
         """`xǁPolicyǁevaluate_statement__mutmut_10/11/100/101`: line/sql/statement.
 
-        (`mutmut_9`/`mutmut_22` on the two limit branches rewrite only the message text,
-        so they are not claimed here -- a finding with no message is still a finding.)
+        The sibling mutants `9` (max_targets branch) and `22` (max_literals branch) set
+        `message=None` on their `Finding(...)`. `Finding.message` is typed `str`, so the
+        mutant installs a type-violating value: the finding still constructs and still
+        carries the right verdict, reason, line, sql and statement, and the defect only
+        surfaces wherever a consumer reads `.message`.
+
+        They are deliberately NOT claimed here. This test asserts on provenance -- line,
+        sql, statement -- and asserting the message text would pin wording, which is
+        the kind of test that breaks when someone improves a message without changing a
+        behaviour. The honest description is: message-provenance is covered by the
+        mutation ledger, and these two are recorded there as unclaimed because closing
+        them means pinning the wording.
+
+        (Checked rather than assumed in both directions. An earlier note here called them
+        "message wording only" on the theory that mutmut deleted the line; the diff shows
+        it rewrites it to `None`, and a probe confirms omitting the field entirely would
+        raise TypeError since `message` has no default. So neither the deletion reading
+        nor the crash reading was right.)
 
         A statement over `max_targets` is refused *before* any rule is consulted, so this
         finding is all the report says about it. Without a line it cannot be found in the
