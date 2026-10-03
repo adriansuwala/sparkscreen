@@ -12,6 +12,17 @@ so that is what this prints.
 directory, applies this one mutation to the copy's src/, and runs one pytest node there.
 The worktree's own src/ is never written to -- a mutant is a temporary artefact, not an
 edit. Exit 0 from `--kill` means the test failed under the mutant, i.e. it kills.
+
+Two things about the scratch run are easy to get wrong, and both produce a result that
+looks fine but means nothing:
+
+  * the control run (see below) -- a kill is only believed if the same test passes
+    unmutated in the same scratch tree;
+  * `tests/test_packaging.py` builds a wheel and creates a venv, which does not survive
+    being run from a copied tree, so `--kill tests/` reports CONTROL FAILED for reasons
+    unrelated to any mutant. Point `--kill` at a test module, not at `tests/`.
+
+Runs are sequential: every check rebuilds the one shared scratch tree.
 """
 from __future__ import annotations
 
@@ -19,6 +30,7 @@ import argparse
 import ast
 import difflib
 import re
+import os
 import shutil
 import subprocess
 import sys
@@ -30,12 +42,31 @@ SCRATCH = Path("/opt/data/cache/scratch/mutcheck")
 
 MUT_RE = re.compile(r"^def ((?:x_)?\w+?)__mutmut_(?:orig|\d+)\(")
 
+#: mutmut joins class and method names with U+01C1 when it mangles a method.
+CLASS_SEP = "\u01c1"
+
+
+def _base_name(name: str) -> str:
+    """`_recover_target` from `xǁ_WriteFinderǁ_recover_target__mutmut_16`.
+
+    mutmut mangles a method into `x<U+01C1>Class<U+01C1>method`, so the class prefix has
+    to come back off before the original function can be located.
+    """
+    stem = name.rsplit("__mutmut_", 1)[0]
+    if stem.startswith("x" + CLASS_SEP):
+        return stem.split(CLASS_SEP)[-1]
+    return stem.removeprefix("x_")
+
 
 def _functions(path: Path) -> dict[str, tuple[int, int]]:
-    """name -> (start_line, end_line) for every top-level def, via the AST."""
+    """name -> (start_line, end_line) for every def, methods included, via the AST.
+
+    mutmut mangles a method as `x\u01c1_Class\u01c1_method`, and those copies live
+    nested inside the class, so a top-level-only walk misses every method mutant.
+    """
     lines = path.read_text().splitlines()
     out: dict[str, tuple[int, int]] = {}
-    for node in ast.parse("\n".join(lines)).body:
+    for node in ast.walk(ast.parse("\n".join(lines))):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             out[node.name] = (node.lineno - 1, node.end_lineno or node.lineno)
     return out
@@ -43,7 +74,7 @@ def _functions(path: Path) -> dict[str, tuple[int, int]]:
 
 def find(name: str) -> tuple[Path, Path, str, str, str]:
     """(mutant_file, orig_file, mangled, base_name, rel_path) for a mutant name."""
-    base_want = name.rsplit("__mutmut_", 1)[0].removeprefix("x_")
+    base_want = _base_name(name)
     for mpath in sorted((PRIMARY / "mutants/src").rglob("*.py")):
         rel = mpath.relative_to(PRIMARY / "mutants/src")
         opath = PRIMARY / "src" / rel
@@ -51,7 +82,7 @@ def find(name: str) -> tuple[Path, Path, str, str, str]:
             continue
         if name not in _functions(mpath):
             continue
-        mangled = name[: -len(f"__mutmut_{name.rsplit('__mutmut_', 1)[1]}")].removeprefix("x_")
+        mangled = _base_name(name)
         return mpath, opath, mangled, base_want, rel.as_posix()
     raise SystemExit(f"no mutant named {name}")
 
@@ -72,6 +103,8 @@ def main() -> int:
     ap.add_argument("name", help="e.g. x__eval_write__mutmut_4")
     ap.add_argument("--kill", default="",
                     help="pytest node id to run against this mutant; 0 exit = killed")
+    ap.add_argument("--no-hypothesis-cleanup", action="store_true",
+                    help="keep hypothesis from deleting the scratch tree on a failure")
     args = ap.parse_args()
 
     name = args.name.split(".")[-1]
@@ -135,10 +168,20 @@ def _run_in_scratch(name, rel, olines, span, mlines, node):
         tl[o0:o1] = body
         target.write_text("\n".join(tl) + "\n")
         ast.parse("\n".join(tl))  # a mutant that does not compile is not a result
-    return _Run(subprocess.run(
-        [str(HERE / ".venv/bin/python"), "-m", "pytest", node, "-q", "--no-header",
-         "-p", "no:randomly"],
-        cwd=SCRATCH, capture_output=True, text=True, timeout=900))
+    # hypothesis writes its `.hypothesis` example database next to the tests, and on a
+    # failing example it `rmtree`s any failing example's parent directory. When that
+    # parent is the scratch tree itself, hypothesis deletes the tree mid-run and pytest
+    # dies with INTERNALERROR/FileNotFoundError -- which the control then reports as a
+    # failure. Opting out of the cleanup keeps the scratch tree intact to read the
+    # result from.
+    cmd = [str(HERE / ".venv/bin/python"), "-m", "pytest", node, "-q", "--no-header",
+           "-p", "no:randomly"]
+    # Set by default, not opt-in: a hypothesis test that fails under the mutant can
+    # delete the scratch tree, which turns a real kill into an unreadable INTERNALERROR
+    # and a real survive into a bogus CONTROL FAILED.
+    os.environ.setdefault("HYPOTHESIS_NO_CLEANUP", "1")
+    return _Run(subprocess.run(cmd, cwd=SCRATCH, capture_output=True, text=True,
+                               timeout=900))
 
 
 class _Run:

@@ -199,6 +199,96 @@ class TestDataFrameWriteClaimsOnlyWhatItKnows:
             "the effect is knowable regardless of the destination"
         )
 
+    @pytest.mark.parametrize("src", [
+        # no positional argument at all, so `_recover_target` takes its `else` arm
+        "df.write.saveAsTable()",
+        # a destination that exists only as a keyword, which this walker cannot read
+        'df.write.saveAsTable(table="prod.t")',
+        # a bare name: present in the AST, but not a value we can prove
+        "df.write.saveAsTable(name)",
+        # jdbc with neither a second positional argument nor table=: its `arg` is
+        # never assigned, so this is the `if arg is None` early return specifically
+        'df.write.jdbc(url)',
+        'df.write.jdbc(url, {})',
+    ])
+    def test_an_unresolvable_destination_is_reported_as_unresolvable(self, src):
+        """`analysis.calls._recover_target__mutmut_16/18`: `return None, False` -> `True`.
+
+        One layer below the `targets` guard, and the reason that guard needs the
+        `known` half at all. Both surviving mutations flipped *could not resolve* to
+        *resolved* on the two early-return paths, so an unresolvable destination came
+        back as `(None, True)`.
+
+        The `targets` tuple alone cannot see it -- the guard is
+        `target_known and target`, and `None` is falsy either way, so `targets` stayed
+        empty and the mutation hid. What changes is which branch of `_eval_write` runs:
+        a resolved destination is checked against the allowlists and reported as
+        outside them, while an unresolved one is reported as unresolvable. Those are
+        different claims about the same line, and the second one is the honest one.
+        """
+        report = screen(src)
+        finding = report.findings[0]
+        assert report.verdict is Verdict.REVIEW
+        assert "cannot resolve" in finding.message, (
+            f"an unresolvable destination must be said to be unresolvable, "
+            f"not checked against the allowlists: {finding.message}"
+        )
+        assert finding.targets == ()
+
+    def test_a_resolvable_destination_is_reported_against_the_allowlist(self):
+        """The other half of the same distinction, so the test above cannot pass
+        vacuously by always printing "cannot resolve".
+
+        The effect is identical in both cases -- both are REVIEW -- which is exactly
+        why the mutation was able to hide: only the message and the `targets` tuple
+        distinguish a destination we refused to guess from one we checked.
+        """
+        finding = screen('df.write.saveAsTable("prod.t")').findings[0]
+        assert "outside the permitted namespaces" in finding.message
+        assert finding.targets == ("prod.t",)
+
+    def test_jdbc_takes_its_table_from_the_second_positional_argument(self):
+        """`_recover_target__mutmut_5/6`: the `len(node.args) >= 2` bound.
+
+        `jdbc(url, table, ...)` puts the destination second, unlike every other sink.
+        Reading position one instead would name the *URL* as the namespace -- the
+        allowlist would then be asked whether `jdbc:mysql://host/db` is writable,
+        which is a question with a confident and wrong answer.
+
+        Pinned at the boundary in both directions: exactly two arguments (the
+        shortest legal call) must still resolve, and the extra arguments a real call
+        carries must not shift the position.
+        """
+        for src in ('df.write.jdbc(url, "prod.t")',
+                    'df.write.jdbc(url, "prod.t", {})',
+                    'df.write.jdbc(url, "prod.t", {}, "extra")'):
+            finding = screen(src).findings[0]
+            assert finding.targets == ("prod.t",), (
+                f"jdbc's table is its second positional argument, not its first: {src}"
+            )
+
+    def test_the_mode_unknown_override_still_names_a_resolved_destination(self):
+        """`x__eval_write__mutmut_29`: `targets=targets` -> `targets=None`.
+
+        The mode-unknown override is the last finding `_eval_write` builds, and the only
+        one whose `targets` a test is likely to have already asserted: the earlier
+        tests all pair it with an *unresolved* destination, where the correct value and
+        `None` look alike through `len()` and `not`.
+
+        Here the destination is a literal we resolved and the mode is a name we could
+        not read, so `targets` has real content to lose. `None` is not "no targets" but
+        "targets unknown", and every consumer iterating `finding.targets` would raise on
+        it.
+        """
+        finding = screen('df.write.mode(m).saveAsTable("prod.t")').findings[0]
+        assert finding.reason is Reason.UNRESOLVED_DYNAMIC_SQL
+        assert finding.targets == ("prod.t",), (
+            f"the override dropped a destination we did resolve: {finding.targets!r}"
+        )
+        assert finding.severity is Severity.HIGH, (
+            "an unexamined overwrite is the one thing that must not be filed low"
+        )
+
     def test_an_overwrite_of_an_unresolved_destination_still_names_no_target(self):
         """The same guard on the destructive path, which is the one that matters.
 
@@ -334,12 +424,12 @@ class TestLengthLimitFindingsCarryTheirEvidence:
         assert finding.sql.startswith(sql[:200])
 
     def test_an_over_long_snippet_is_denied_at_the_code_length_limit(self):
-        """`x_screen__mutmut_72/82`: the `max_code_chars` finding's own fields.
+        """`x_screen__mutmut_82`: the `max_code_chars` finding's 200-character echo.
 
         The boundary tests in test_screen_policy.py pin *whether* the cap fires. None of
-        them look at what the finding then says, which is why a `message=None` and a
-        `severity=None` here both survived: a DENY with a null severity is a DENY whose
-        severity sort key cannot be computed.
+        them look at what the finding then says, which is why `sql=sql[:200] + "..."`
+        mutated to 201 survived: every such test asserts `len(sql) < len(original)`,
+        which 204 satisfies just as well as 203.
         """
         source = "# pad\n" * (default_policy().limits.max_code_chars // 6 + 1)
         report = screen(source)
@@ -348,6 +438,29 @@ class TestLengthLimitFindingsCarryTheirEvidence:
         assert finding.reason is Reason.CODE_LENGTH_EXCEEDED
         assert finding.severity is Severity.MEDIUM
         assert "characters" in finding.message
+
+    def test_an_over_long_sql_sink_is_denied_with_its_own_fields(self):
+        """`x_screen__mutmut_72`: `severity=None` on the *SQL* length finding.
+
+        The source-level cap and the per-statement SQL cap are two separate findings
+        that share a reason, so a test on the first says nothing about the second. Here
+        the mutation only nulls the severity, and the verdict and reason are untouched:
+        the report still DENYs, it just carries a finding whose severity cannot be
+        sorted or ranked. Only the SQL branch reaches the second `Finding`.
+        """
+        over = "x" * (default_policy().limits.max_sql_chars + 10)
+        report = screen('spark.sql(%r)' % over)
+        assert report.verdict is Verdict.DENY
+        findings = [f for f in report.findings
+                    if f.reason is Reason.CODE_LENGTH_EXCEEDED]
+        assert len(findings) == 1, f"expected one SQL-length finding, got {findings}"
+        finding = findings[0]
+        assert finding.severity is Severity.MEDIUM, (
+            f"SQL-length DENY filed at {finding.severity}; a null severity cannot be "
+            "sorted or ranked by a consumer"
+        )
+        assert "characters" in finding.message
+        assert finding.sql.endswith("..."), "the echoed SQL stays truncated"
 
 
 class TestFoldedConstantBoundsAreInclusive:
@@ -563,10 +676,23 @@ SURVIVORS_NOT_COVERED = {
     #    `classes.get(...)` lookup drops it whether or not the name filter catches it.
     "label_universe.x__child_rule_contexts__mutmut_3/5":
         "_NOT_RULES members have no corresponding context class.",
-    # -- unreachable: the module-level constant is built at import, before mutmut's
-    #    trampoline is armed, so no test can observe the mutation.
+    # -- equivalent: `arg = None` -> `arg = ""` is unreachable on its own because the
+    #    jdbc arm always reassigns `arg` before the `if arg is None` test can see it,
+    #    and the other arm starts from `node.args[0]`.
+    "calls._recover_target__mutmut_4": "the `arg = None` initialiser is always "
+                                        "overwritten or bypassed.",
+    # -- equivalent: the `severity=` line is deleted outright rather than mangled, and
+    #    `Finding.severity` already defaults to `Severity.MEDIUM`, so an omitted
+    #    severity resolves to the same value either way.
+    "policy.x_policy_from_dict__mutmut_22":
+        "deleting `severity=` matches Finding's own MEDIUM default.",
+    # -- killed by a crash, not by an assertion. `_e` is reachable, but `frozenset(None)`
+    #    raises TypeError the moment LABEL_EFFECTS is built at import, so the mutant dies
+    #    before any test body runs. Distinct from "unreachable": here the code genuinely
+    #    executes. No behavioural test is warranted -- the mutation is not a defect that
+    #    could reach a report.
     "effects.x__e__mutmut_1":
-        "`_e` is only called while building LABEL_EFFECTS, at import time.",
+        "frozenset(None) raises at import; no assertion can observe it.",
     # -- unreachable: the `except` arm only fires if the generated parsers are missing,
     #    which is the packaging failure test_packaging.py guards against.
     "effects.x_effect_label_drift__mutmut_12": "needs grammar_labels() to raise.",

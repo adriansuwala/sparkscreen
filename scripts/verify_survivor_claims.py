@@ -1,5 +1,9 @@
 """Re-verify every mutant claim made by tests/test_mutation_survivors.py.
 
+Sequential by necessity: each check rebuilds one shared scratch worktree, so running
+this concurrently with itself corrupts that tree and shows up as a spurious
+CONTROL FAILED.
+
 Two directions, and the second is the one that matters most. For each mutant the test
 file names, run it against that test with a mutation applied *and* unapplied:
 
@@ -32,7 +36,20 @@ CLAIMED = [
     # -- screen._eval_write: targets, and severity
     ("x__eval_write__mutmut_4", "TestDataFrameWriteClaimsOnlyWhatItKnows"),
     ("x__eval_write__mutmut_39", "TestDataFrameWriteClaimsOnlyWhatItKnows"),
+    # -- analysis.calls: the layer that decides whether a destination is knowable
+    ("x\u01c1_WriteFinder\u01c1_recover_target__mutmut_16",
+     "TestDataFrameWriteClaimsOnlyWhatItKnows"),
+    ("x\u01c1_WriteFinder\u01c1_recover_target__mutmut_18",
+     "TestDataFrameWriteClaimsOnlyWhatItKnows"),
+    ("x\u01c1_WriteFinder\u01c1_recover_target__mutmut_5",
+     "TestDataFrameWriteClaimsOnlyWhatItKnows"),
+    ("x\u01c1_WriteFinder\u01c1_recover_target__mutmut_6",
+     "TestDataFrameWriteClaimsOnlyWhatItKnows"),
     ("x__eval_write__mutmut_26", "TestEveryFindingHasRealEnumMembers"),
+    ("x__eval_write__mutmut_29", "TestDataFrameWriteClaimsOnlyWhatItKnows"),
+    ("x_screen__mutmut_72", "TestLengthLimitFindingsCarryTheirEvidence"),
+    ("x__eval_write__mutmut_105", "TestSeverityIsRankedAsDocumented"),
+    ("x_default_policy__mutmut_55", "TestSeverityIsRankedAsDocumented"),
     # -- limits
     ("x_screen__mutmut_82", "TestLengthLimitFindingsCarryTheirEvidence"),
     ("x__checked_num__mutmut_3", "TestFoldedConstantBoundsAreInclusive"),
