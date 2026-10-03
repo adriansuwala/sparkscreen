@@ -5,89 +5,272 @@ on:
     branches: [master, main]
   pull_request:
 
-# Cancel superseded runs on the same ref, but never cancel master.
+# Cancel superseded runs on the same ref, but never cancel master: master is the
+# release line and a half-finished cancel there would leave it unverified.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
+# Read-only by default. The publish job opts back in to what it actually needs.
+permissions:
+  contents: read
+
 jobs:
-  test:
-    # Matrix both pinned grammars explicitly, so a version-specific regression cannot
-    # hide behind the default. tests/conftest.py's `spec_key` fixture parametrizes most
-    # tests; this matrix additionally guards the version-resolution paths.
+  fast:
+    # The fast suite: ~2,900 tests, no JVM, no pyspark. Deliberately installed from the
+    # `dev` extra only -- `dev` must NOT contain pyspark, because the suite stays at ~20s
+    # precisely because the everyday environment has no Spark in it (pyproject.toml).
+    #
+    # Matrix: 3.13 is the version the project is developed against locally, and 3.12 is
+    # the oldest interpreter the suite currently passes on. 3.10 is NOT in the matrix and
+    # must not be added without fixing it first -- see the note below.
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.12"]
+        python-version: ["3.13", "3.12"]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+
+      - name: Reject an unsupported Python early
+        # requires-python is >=3.10, but the suite does not actually collect on 3.10:
+        # tests/test_packaging.py imports tomllib (3.11+), and IntFlag.name for a
+        # multi-bit flag is None on 3.10, which fails test_effects.py. Rather than let
+        # the matrix fail with a confusing collection error, say so here.
+        run: |
+          python - <<'PY'
+          import sys
+          if sys.version_info < (3, 11):
+              raise SystemExit(
+                  f"sparkscreen's test suite requires Python >= 3.11 (running "
+                  f"{sys.version_info.major}.{sys.version_info.minor}). "
+                  "pyproject.toml declares >=3.10, which is currently untrue -- "
+                  "see the CI notes in CONTRIBUTING.md."
+              )
+          PY
 
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+          # No lockfile exists in this repo, so hash pyproject.toml instead: the
+          # dependency set is declared there and nowhere else. Without an explicit
+          # dependency path, setup-python cannot build a cache key and falls back to
+          # hashing every requirements.txt it can find -- of which there are none.
+          cache-dependency-path: pyproject.toml
 
       - name: Install
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Fast test suite
-        run: pytest tests/ -q --deselect tests/differential
-
-      # The generated parsers ship in the wheel, so the wheel itself must be importable
-      # on a machine with no JVM and no grammar sources. That is a release property, and
-      # CI is the only place it is actually true.
-      - name: Wheel imports with no JVM
+      - name: Prove pyspark is absent
+        # This is the property the fast suite depends on, and it is cheap to state
+        # explicitly rather than assume. If a future edit adds pyspark to `dev`, this
+        # fails loudly instead of quietly turning the fast suite into a slow one.
         run: |
-          pip install build
-          python -m build --wheel
-          pip install dist/*.whl --force-reinstall --no-deps
-          cd /tmp && python -c "
-          from sparkscreen import screen
-          r = screen('spark.sql(\"DROP TABLE prod.users\")')
-          assert r.verdict.value == 'deny', r.findings
-          print('wheel ok, verdict:', r.verdict.value)
-          "
-          python -c "
-          import importlib.resources as res
-          import sparkscreen.grammar.generated.spark_4_0 as g
-          print('generated parser present:', g.__file__)
-          "
+          if python -c "import pyspark" 2>/dev/null; then
+            echo "::error::pyspark is installed in the fast environment; it belongs only in the differential environment"
+            exit 1
+          fi
+          echo "pyspark correctly absent from the fast environment"
 
-  differential:
-    # Runs the grammar against a real engine. This is the only job that catches a
-    # parser that disagrees with the Spark it claims to screen for -- the case-insensitivity
-    # bug was invisible to the entire hand-written corpus.
+      - name: Fast test suite
+        # No `-q`: pyproject's addopts already sets it, and a second -q suppresses the
+        # "N passed" summary line that is the whole point of reading CI output.
+        #
+        # The whole tests/ tree is run. tests/differential is NOT deselected: it is
+        # already inert here, because both differential modules call
+        # pytest.importorskip("pyspark") at import time and skip cleanly. Passing
+        # --deselect tests/differential would be a no-op that reads as if it excluded
+        # something.
+        run: python -m pytest tests/
+
+  wheel:
+    # The generated ANTLR parsers are committed and ship in the wheel, so the artefact
+    # must import and screen on a machine with no JVM and no grammar sources. That is a
+    # release property, and CI is the only place it is actually true.
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
           cache: pip
+          cache-dependency-path: pyproject.toml
 
-      - name: Install with pyspark
+      - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]" pyspark==3.5.1
+          pip install -e ".[dev]" build
+
+      - name: Build the wheel
+        run: python -m build --wheel --outdir dist
+
+      - name: Assert no grammar sources or ANTLR jar shipped
+        # The .g4 files are maintainer inputs and the jar is a multi-megabyte build
+        # tool; neither is on the runtime path. Shipping them makes the wheel far
+        # larger and invites the wrong inference (editing a .g4 in site-packages
+        # changes nothing, because nothing regenerates from it).
+        run: |
+          python - <<'PY'
+          import glob, sys, zipfile
+
+          wheels = glob.glob("dist/*.whl")
+          assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
+          names = zipfile.ZipFile(wheels[0]).namelist()
+
+          g4 = [n for n in names if n.endswith(".g4")]
+          jar = [n for n in names if n.endswith(".jar")]
+          assert not g4, f"grammar sources leaked into the wheel: {g4}"
+          assert not jar, f"ANTLR jar leaked into the wheel: {jar}"
+
+          # The other half of the same contract: if the generated parsers were missing,
+          # "no JVM needed" would be true only because nothing could parse anything.
+          for spec in ("spark_3_5_1", "spark_4_0"):
+              for mod in ("SqlBaseLexer.py", "SqlBaseParser.py"):
+                  path = f"sparkscreen/grammar/generated/{spec}/{mod}"
+                  assert path in names, f"{path} missing from the wheel"
+
+          print(f"wheel contents ok: {len(names)} entries, no .g4, no .jar, both parsers present")
+          PY
+
+      - name: Install the wheel into a clean environment
+        run: |
+          python -m venv /tmp/wheel-venv
+          /tmp/wheel-venv/bin/python -m pip install --upgrade pip
+          /tmp/wheel-venv/bin/python -m pip install dist/*.whl
+
+      - name: Screen with no JVM available
+        # PATH is reduced to an empty directory on purpose. GitHub's ubuntu runners
+        # preinstall a JDK at /usr/bin/java, so a probe that keeps the default PATH --
+        # or the usual /usr/bin:/bin -- would find that java and prove nothing. With an
+        # empty PATH, `shutil.which('java')` cannot succeed, so the run below genuinely
+        # exercises the no-JVM path rather than assuming it.
+        #
+        # env is stripped too (no JAVA_HOME, no JRE_HOME), and the install is a real
+        # wheel install rather than an editable one, so `src/` is not on the path.
+        run: |
+          mkdir -p /tmp/empty-bin
+          env -i PATH=/tmp/empty-bin HOME=/tmp /tmp/wheel-venv/bin/python - <<'PY'
+          import shutil
+
+          assert shutil.which("java") is None, "java is reachable; this proves nothing"
+          assert shutil.which("javac") is None, "javac is reachable; this proves nothing"
+
+          import sparkscreen
+          from sparkscreen import screen
+
+          assert screen('spark.sql("DROP TABLE prod.t")').verdict.value == "deny"
+          assert screen('spark.sql("delete from t where id=1")').verdict.value == "review"
+          assert screen('df.write.mode("overwrite").saveAsTable("prod.t")').verdict.value == "deny"
+
+          # Prove the committed parser actually loaded and parsed, rather than the
+          # verdict happening to come from somewhere else.
+          from sparkscreen.grammar.parser import get_parser
+          for key in ("spark-4.0", "spark-3.5.1"):
+              assert get_parser(key).parse("select 1"), key
+
+          print("wheel ok with no JVM:", sparkscreen.__version__)
+          PY
+
+      - name: Packaging invariants from the test suite
+        # tests/test_packaging.py already asserts the version agreement and the wheel
+        # contents. Run it rather than duplicating those checks above -- this step is
+        # the belt to that braces, and it fails loudly if `build` ever stops being
+        # importable, which would otherwise skip these tests silently.
+        run: python -m pytest tests/test_packaging.py -v
+
+  differential:
+    # Runs the grammar against a real engine. This is the only job that catches a parser
+    # that disagrees with the Spark it claims to screen for -- the case-insensitivity bug
+    # was invisible to the entire hand-written corpus.
+    #
+    # Needs a JVM and a real pyspark, so it is separate from the fast suite by design.
+    runs-on: ubuntu-latest
+    # Generous: Spark session startup dominates, and the local run takes ~70s on a warm
+    # machine with a local JVM. Cold CI plus JVM download needs real headroom.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install with pyspark
+        # `[diff]` pins pyspark==3.5.1 in pyproject.toml. The recorded expectations in
+        # tests/differential/corpus.py describe one specific Spark version's behaviour,
+        # so "the newest one" would silently invalidate them. The pin belongs in
+        # pyproject.toml, not here.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,diff]"
+
+      - name: Confirm the pinned engine and a working JVM
+        # If either of these is wrong the suite below would skip or fail confusingly
+        # rather than telling us the environment was wrong.
+        run: |
+          python -c "import pyspark; assert pyspark.__version__ == '3.5.1', pyspark.__version__; print('pyspark', pyspark.__version__)"
+          java -version
+          echo "JAVA_HOME=$JAVA_HOME"
 
       - name: Differential suite against real Spark 3.5.1
-        env:
-          JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
-        run: PYTHONPATH=src:. pytest tests/differential -q
+        # No PYTHONPATH needed: pyproject sets pythonpath = ["src"] for pytest, and
+        # tests/differential inserts its own paths at import time. Verified locally.
+        run: python -m pytest tests/differential/ -v
+
+  docs:
+    # The four documentation audits. These are standalone scripts, NOT pytest tests, so
+    # nothing else in CI runs them. They are cheap and they catch real staleness -- a
+    # claim in README.md or docs/user-docs/ that has drifted from the code.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Documentation audits
+        # Run as four separate steps, not a loop: a failure names the audit that broke
+        # in the job log without needing to be read back out of a combined exit code.
+        run: python _verify_docs.py
+      - run: python _verify_effect.py
+      - run: python _verify_agents.py
+      - run: python _verify_readme.py
 
   grammar-build:
-    # Regenerating the parsers is a maintainer step, and a broken translation would
-    # otherwise surface only at the next release. Run it and require a clean diff.
+    # Regenerating the parsers is a maintainer operation: the generated parsers are
+    # committed deliberately so that installing and running needs no JVM. This job proves
+    # the committed parsers still match what the pinned grammars and the port produce,
+    # so a stale parser surfaces here instead of at the next release.
+    #
+    # Note this DOES regenerate and diff. That is the point of the job, and it is safe:
+    # verified locally, regeneration reproduces the committed files byte for byte.
+    # Nothing on the runtime path regenerates anything, so a failure here is a
+    # maintainer signal ("run the build and commit"), not a broken install.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -98,18 +281,44 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Cache the ANTLR tool jar
+        # The jar is a gitignored build input (see .gitignore: src/sparkscreen/grammar/.cache/).
+        # It is downloaded on demand by sparkscreen.grammar.spec._antlr_jar. Caching it
+        # keyed on the ANTLR version keeps this job from re-downloading ~2 MB every run.
+        uses: actions/cache@v4
+        with:
+          path: src/sparkscreen/grammar/.cache
+          key: antlr-4.13.1-${{ runner.os }}
 
       - name: Regenerate parsers from the pinned grammars
+        # --generate only; no --fetch. The .g4 sources are vendored in the tree at their
+        # pinned 40-character commits, so this must not reach out to fetch grammars.
+        run: python -m sparkscreen.grammar.build --generate
+
+      - name: Require a clean diff
         run: |
-          pip install -e .
-          python -m sparkscreen.grammar.build --generate
-          git diff --exit-code -- src/sparkscreen/grammar/generated \
-            || (echo "::error::generated parsers are stale; run the build and commit"; exit 1)
+          if ! git diff --exit-code -- src/sparkscreen/grammar/generated; then
+            echo "::error::generated parsers are stale; run 'python -m sparkscreen.grammar.build --generate' and commit the result"
+            exit 1
+          fi
 
   build-wheels:
+    # Wheel builds across every interpreter the wheel claims to support, plus the
+    # release publish. Kept last and independent of every other job: nothing here is
+    # consumed by the test jobs, so a packaging-tool failure cannot mask a test result.
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
@@ -117,7 +326,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install build && python -m build --wheel
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install --upgrade pip && python -m build --wheel
+
+      # Publishing is release-only and needs an identity token, not an API password.
       - uses: pypa/gh-action-pypi-publish@release/v1
         if: startsWith(github.ref, 'refs/tags/v')
         with:
