@@ -140,7 +140,25 @@ tell you whether it agrees with the engine. The version-specific corpus entries
 (`VERSION_SPECIFIC`, `VERSION_SPECIFIC_REJECTED`) are where the expected differences go —
 do not put a 4.0-only statement in the shared corpus.
 
-### Mutation testing at scale
+### Mutation testing — running
+
+Agreed and in progress. The argument is exactly your framing: this tests the tests.
+For a screener the mutation that matters is `DENY` -> `ALLOW`, and no amount of coverage
+finds it, because the line still executes — it just returns the wrong answer.
+
+```bash
+.venv/bin/mutmut run       # policy / model / screen / treewalk, ~790 mutants
+.venv/bin/mutmut results   # survivors = assertions that do not bite
+```
+
+Roughly 790 mutants at ~50s per full-suite run. **Expect hours, not minutes.** A survivor
+in `model.py` or `policy.py` is a real screener bug; a survivor in `screen.py` is the
+expensive kind, since that is the aggregation path that has already produced one
+production bug (F1). The next extensions are `folding.py` and `calls.py`, which decide
+what SQL gets screened at all.
+
+Read it as a *measurement*, not a gate: a high survivor count in a module means its
+tests need strengthening, not that the module is wrong.
 
 `mutmut-config.toml` exists and is scoped to the decision logic rather than the grammar
 port. Worth a real run to find assertions that do not bite.
