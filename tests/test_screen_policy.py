@@ -451,6 +451,74 @@ class TestSqlLengthLimit:
 
 
 class TestOtherLimits:
+    def test_limit_boundary_is_exclusive(self, spec_key):
+        """A statement exactly AT a limit is under it; one over is not.
+
+        Found by mutation testing: flipping `len(targets) > max_targets` to `>=`
+        survived the entire suite. Both forms pass every other test, because the existing
+        tests use `max_targets=0` with one target -- where `>` and `>=` agree. Only the
+        exact boundary distinguishes them.
+
+        For a screener this is a real, if small, hole: an off-by-one here admits a
+        statement sitting precisely on a limit an operator set, which is exactly the
+        value they would expect the limit to exclude.
+        """
+        from sparkscreen.policy import Policy as _P
+
+        # one target, limit of exactly 1 -> under the limit
+        at_limit = _P(name="t", rules=default_policy().rules,
+                      limits=Limits(max_targets=1))
+        report = screen(sql_call("select * from t"), at_limit, spec=spec_key)
+        assert Reason.RESOURCE_LIMIT not in reasons(report), (
+            "exactly at the limit must be allowed through"
+        )
+        # one target, limit of 0 -> over
+        over = _P(name="t", rules=default_policy().rules, limits=Limits(max_targets=0))
+        assert Reason.RESOURCE_LIMIT in reasons(screen(
+            sql_call("select * from t"), over, spec=spec_key))
+
+    def test_literal_limit_boundary_is_exclusive(self, spec_key):
+        from sparkscreen.policy import Policy as _P
+
+        at_limit = _P(name="l", rules=default_policy().rules,
+                      limits=Limits(max_literals=1))
+        report = screen(sql_call("select * from t where a = 'x'"), at_limit, spec=spec_key)
+        assert Reason.RESOURCE_LIMIT not in reasons(report)
+        over = _P(name="l", rules=default_policy().rules, limits=Limits(max_literals=0))
+        assert Reason.RESOURCE_LIMIT in reasons(screen(
+            sql_call("select * from t where a = 'x'"), over, spec=spec_key))
+
+    def test_read_only_policy_raises_severity_for_unsupported_statements(self, spec_key):
+        """`read_only_policy()` rewrites config-ish rules to UNKNOWN/UNSUPPORTED_STATEMENT.
+
+        Found by mutation testing: negating `r.severity is Severity.INFO` survived, and so
+        did flipping the `is` to `is not`. The verdict half is asserted below; the severity
+        half is cosmetic but is the difference between a finding that sorts to the top of a
+        reviewer's queue and one that does not, so it is pinned too.
+
+        This override is the whole reason `read_only_policy()` is a different policy rather
+        than `default_policy()` with fewer rules: for an analysis-only agent, `CACHE TABLE`
+        is not "deny this", it is "this agent cannot help you with this".
+        """
+        from sparkscreen import read_only_policy
+
+        # `CACHE TABLE` matches `review.config` under the default policy (REVIEW), and is
+        # rewritten here. (`CREATE PIPELINE` looked like a better choice but is
+        # unparseable on these grammars, which exercises a different path entirely.)
+        report = screen(sql_call("CACHE TABLE t"), read_only_policy(), spec=spec_key)
+        finding = next(f for f in report.findings
+                       if f.reason is Reason.UNSUPPORTED_STATEMENT)
+        assert finding.verdict is Verdict.UNKNOWN
+        assert finding.rule == "review.config"
+        assert finding.severity.value != "info", (
+            "the rewrite should bump severity off INFO, got "
+            f"{finding.severity.value}"
+        )
+
+        # and the contrast that makes the override meaningful
+        default_report = screen(sql_call("CACHE TABLE t"), spec=spec_key)
+        assert default_report.verdict is Verdict.REVIEW
+
     def test_too_many_targets_is_resource_limit(self, spec_key):
         policy = Policy(name="t", rules=default_policy().rules,
                         limits=Limits(max_targets=0))
@@ -511,6 +579,66 @@ class TestWritableNamespaceAllowlist:
         assert "outside" in " ".join(
             f.message for f in screen(sql_call("DROP TABLE prod.staging.foo"), policy,
                                       spec=spec_key).findings)
+
+    def test_a_wildcard_does_not_absorb_extra_components(self, spec_key):
+        """`prod.*` means "tables in prod", not "anything under prod".
+
+        Regression test on `NamespaceRef.matches`, which used to let a trailing `*`
+        absorb any number of components, so `prod.*` matched `prod.staging.x` and
+        `prod.a.b.c.d.e`. For an *allowlist* that is a fail-open: an operator who wrote
+        `readable_namespaces=("prod.*",)` got every descendant namespace, including ones
+        they would never have named.
+
+        Asserted on the DataFrame path, which passes the destination through whole and so
+        exercises `matches` directly. The SQL path has a separate, pre-existing extraction
+        problem for 3+ component names -- recorded as F14, and deliberately not conflated
+        with this one, because fixing one while asserting the other would hide both.
+        """
+        from sparkscreen.policy import Policy as _P
+
+        policy = _P(name="w", rules=default_policy().rules,
+                    writable_namespaces=("prod.*",), readable_namespaces=("*",))
+
+        assert screen('df.write.mode("append").saveAsTable("prod.users")', policy,
+                      spec=spec_key).verdict is Verdict.ALLOW
+        for name in ("prod.staging.x", "prod.a.b.c"):
+            report = screen(f'df.write.mode("append").saveAsTable("{name}")', policy,
+                            spec=spec_key)
+            assert report.verdict is Verdict.REVIEW, (
+                f"{name} must not be writable under prod.*, got {report.verdict}"
+            )
+
+    def test_a_wildcard_does_not_match_a_longer_component(self, spec_key):
+        """`prod.*` must not match `production.users` -- `*` is not a prefix match."""
+        from sparkscreen.policy import Policy as _P
+
+        policy = _P(name="r", rules=default_policy().rules,
+                    readable_namespaces=("prod.*",))
+        assert screen(sql_call("select * from prod.users"), policy,
+                      spec=spec_key).verdict is Verdict.ALLOW
+        # `*` is a whole-component wildcard, not a string prefix.
+        assert screen(sql_call("select * from production.users"), policy,
+                      spec=spec_key).verdict is Verdict.REVIEW
+
+    def test_a_bare_star_still_means_no_restriction(self, spec_key):
+        """The fix above must not break `("*",)`, which means "everything".
+
+        This is the case a naive arity rule would catch: a bare `*` is one component and
+        most names are two or more.
+        """
+        from sparkscreen.policy import Policy as _P
+
+        # Both lists, because a DataFrame write is also subject to the *writable*
+        # check, and an empty writable_namespaces means REVIEW by design (an absent
+        # allowlist is an absent answer). Getting that wrong is what made this test fail
+        # the first time -- for the right reason, about the wrong thing.
+        policy = _P(name="o", rules=default_policy().rules,
+                    readable_namespaces=("*",), writable_namespaces=("*",))
+        for name in ("prod.users", "staging.foo"):
+            assert screen(sql_call(f"select * from {name}"), policy,
+                          spec=spec_key).verdict is Verdict.ALLOW, name
+        assert screen('df.write.mode("append").saveAsTable("a.b.c.d")', policy,
+                      spec=spec_key).verdict is Verdict.ALLOW
 
     def test_read_only_statements_are_unaffected_by_writable_list(self, spec_key):
         policy = policy_with_writable("staging.*")

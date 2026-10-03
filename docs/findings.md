@@ -259,6 +259,55 @@ by a rule.* The `elif` bug in the namespace allowlists (F8) was the third instan
 correctness property is expressed as "this case is absent from the set", it is one new
 case away from being wrong, and nothing will complain until the case exists.
 
+## F14 — SQL namespace extraction drops a component named `x`, and can truncate a 3-part name
+
+**Severity.** Correctness, with a fail-open direction. Found 2026-10-03 while auditing the
+README's claim that namespace patterns are per-component.
+
+**What happens.** `treewalk.extract_namespaces` does not always return the name that was
+written. Two distinct behaviours, both measured:
+
+```
+prod.users        -> prod.users        fine
+prod.staging.x    -> prod.staging      truncated
+prod.x            -> prod              truncated
+prod.x.y          -> prod.y            the middle `x` is dropped too
+prod.ax           -> prod.ax           fine
+```
+
+So a component named exactly `x` (case-insensitive) is dropped wherever it appears, and
+some 3-part names are truncated to 2 parts. `x` is evidently treated as an alias or
+placeholder by the grammar's identifier handling — the same ambiguity that makes
+`SELECT * FROM prod.staging AS x` legal SQL.
+
+**Why it matters.** Namespace allowlists match whatever extraction produced. Both
+directions of error are reachable:
+
+- **Fail-closed:** `readable_namespaces=("prod.*",)` against `select * from prod.x` gets
+  `prod`, which does not match `prod.*`, so a legitimate read comes back `REVIEW`. Annoying
+  but safe.
+- **Fail-open:** the same policy against `select * from prod.staging.x` gets
+  `prod.staging`, which *does* match `prod.*`, so a name the operator never authorised is
+  allowed.
+
+**Fixed here.** `NamespaceRef.matches` was separately wrong: a trailing `*` absorbed any
+number of components, so `prod.*` matched `prod.a.b.c.d.e` on the DataFrame path. That is
+now exact-arity (`*` matches one component; a bare `"*"` still means everything), which is
+the fail-closed direction and is regression-tested.
+
+**Deliberately not fixed here.** The extraction quirk is left as-is and recorded. It lives
+in grammar-derived tree walking, and `prod.staging.x` is genuinely ambiguous SQL — Spark
+itself resolves it against the catalog. A correct fix needs the real Spark resolution order,
+not a guess, and it should be driven by the live differential suite rather than by
+reasoning about the parse tree. Attempting it here, at the end of an unrelated change, is
+exactly how the "property held by an exception" bugs happen.
+
+**The general lesson.** The README claimed a property — "patterns are per component" — that
+was true for the matcher and false for the extractor feeding it. Auditing prose against code
+found it; no test had. Documentation claims about *data flow* are as testable as claims
+about APIs, and `_verify_readme.py` now asserts the ones that are.
+
+
 ## Where the test suite was wrong
 
 Marked separately because these are the ones where the code was right and the

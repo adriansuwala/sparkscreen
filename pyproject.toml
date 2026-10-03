@@ -30,14 +30,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Split on purpose. `dev` must NOT contain pyspark: the fast suite is ~2,500 tests in
+# 45s and stays that way only because the everyday environment has no PySpark in it.
+# `diff` is the separate, slow, JVM-requiring environment for comparing against a real
+# engine. See scripts/setup.sh and the two-venv note in AGENTS.md.
 dev = [
   "pytest>=8",
   "hypothesis>=6.100",
   "pytest-cov>=5",
-  "mutmut>=3",
-  # Differential testing needs a real engine. Install the pyspark version you want to
-  # compare against alongside these; see tests/differential/.
-  "pyspark>=3.5,<4",
+]
+diff = [
+  # Differential testing needs a real engine. Pin it: the recorded expectations in
+  # tests/differential/corpus.py describe one specific Spark version's behaviour, and
+  # "the newest one" would silently invalidate them.
+  "pyspark==3.5.1",
 ]
 
 [project.scripts]

@@ -52,15 +52,32 @@ class NamespaceRef:
         return self.parts[-1] if self.parts else None
 
     def matches(self, pattern: str) -> bool:
-        """Match against a dotted pattern, honouring `*` wildcards per component."""
+        """Match against a dotted pattern, honouring `*` wildcards per component.
+
+        Two rules, and the second one is the important one:
+
+        1. A bare `"*"` matches anything. It is the "no restriction" pattern and has to
+           keep working for a policy that permits every namespace.
+        2. Otherwise `*` matches **exactly one component**, so arity must agree.
+
+        Rule 2 is a fix. The previous implementation let a `*` absorb any number of
+        trailing components, so `prod.*` matched `prod.staging.x` and
+        `prod.a.b.c.d.e`. That is the wrong direction for an allowlist: an operator
+        writing `readable_namespaces=("prod.*",)` means "tables in prod", and the old
+        reading silently widened that to every descendant namespace -- including ones
+        they would not have named. It also matched the intent recorded in the old comment
+        ("allow `db.*` to match a bare table with no db part"), which no test depended on
+        and which is not actually expressible as a simple arity relaxation.
+
+        Found by auditing the README's claim that patterns are per-component, which the
+        code did not honour.
+        """
         pat = tuple(p for p in pattern.split(".") if p != "")
+        if pat == ("*",):
+            return True
         if len(pat) != len(self.parts):
-            # allow `db.*` to match a bare table with no db part, and vice versa
-            if "*" not in pat:
-                return False
-        return all(p == "*" or p == part for p, part in zip(pat, self.parts)) and (
-            len(pat) == len(self.parts) or "*" in pat
-        )
+            return False
+        return all(p == "*" or p == part for p, part in zip(pat, self.parts))
 
     def __str__(self) -> str:
         return self.name

@@ -715,6 +715,41 @@ class TestWiring:
         assert len(r.by_effect(Effect.DESTROY_DATA)) == 1
         assert r.by_effect(Effect.LOAD_CODE) == []
 
+    def test_has_effect_requires_every_flag_not_any(self):
+        """`has_effect` is public API and was entirely unasserted.
+
+        Found by mutation testing: negating its `all(...)` to `not in` survived the whole
+        suite, because nothing called it. That makes it untested API, not merely
+        unexercised code -- and it is the kind of helper a caller would use as "is this
+        finding destructive?", where `any` vs `all` is the difference between a right
+        answer and a wrong one.
+
+        The mutation to catch is `all(e in ...)` -> `not (all ...)` semantics, i.e. the
+        partial-flag case. With `{WRITE_DATA, DESTROY_DATA}` present, asking only about
+        DESTROY_DATA must still be True.
+        """
+        f = Finding(Verdict.DENY, Reason.DENY_RULE, "x",
+                    effect=frozenset({Effect.WRITE_DATA, Effect.DESTROY_DATA}))
+
+        assert f.has_effect(Effect.DESTROY_DATA)
+        assert f.has_effect(Effect.WRITE_DATA)
+        # The distinguishing case: all-of-a-subset, not any-of.
+        assert f.has_effect(Effect.DESTROY_DATA, Effect.WRITE_DATA)
+        assert not f.has_effect(Effect.DESTROY_DATA, Effect.READ_DATA)
+
+        # Zero-arg is vacuously True -- `all([]) is True`. Pinned deliberately: my first
+        # draft asserted False, on the reasonable-sounding grounds that a finding with no
+        # flags cannot "have" an effect. Standard Python says otherwise, and the
+        # docstring's phrasing ("every flag in `effects` is present") agrees: nothing is
+        # missing. Callers who want the other behaviour must check `if effect`. Left
+        # unpinned, someone reading this test would eventually "fix" the implementation
+        # to match their intuition and break every `has_effect(*wanted)` caller.
+        assert f.has_effect()
+
+        # An empty effect set has nothing, so any non-empty query is False.
+        empty = Finding(Verdict.ALLOW, Reason.NO_MATCHING_RULE, "y")
+        assert not empty.has_effect(Effect.DESTROY_DATA)
+
     def test_report_to_dict_is_json_serialisable_with_effects(self):
         r = Report(policy="default", grammar="spark-4.0")
         r.add(Finding(Verdict.DENY, Reason.DENY_RULE, "x",

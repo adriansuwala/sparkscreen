@@ -220,7 +220,7 @@ def test_both_allowlists_apply_independently():
     assert any(f.reason is Reason.OUTSIDE_ALLOWLIST
                for f in writable_but_unreadable.findings)
 
-    fully_allowed = screen('spark.sql("SELECT * FROM prod.x")', policy)
+    fully_allowed = screen('spark.sql("SELECT * FROM prod.users")', policy)
     assert fully_allowed.verdict is Verdict.ALLOW
 
     fully_denied = screen('spark.sql("SELECT * FROM other.x")', policy)
