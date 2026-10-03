@@ -220,6 +220,13 @@ class TestFindingsCarryTheirProvenance:
         The SQL path and the DataFrame path are documented to produce reports that "read
         the same way"; this is the half of that promise that makes a finding usable. An
         ALLOW finding with no target cannot be audited after the fact.
+
+        The sibling `mutmut_92` deletes the `targets=` argument outright on this same
+        branch, so `targets` falls back to its `()` default and the finding loses its
+        target while keeping a non-empty verdict. Same observable defect, opposite
+        mechanism: `mutmut_85` passes `None`, `mutmut_92` omits the field. Both are
+        killed here for the same reason -- the assertion is on the value, not on how
+        the mutant damaged it.
         """
         policy = Policy(name="p", rules=default_policy().rules,
                         writable_namespaces=("prod.*",), readable_namespaces=("*",))
