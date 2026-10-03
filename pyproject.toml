@@ -99,9 +99,14 @@ include = ["sparkscreen*"]
 # narrow the target with do_not_mutate.
 source_paths = ["src/sparkscreen"]
 do_not_mutate = [
+  # Generated ANTLR parsers: ~300k lines that no test asserts against line-by-line.
   "src/sparkscreen/grammar/generated/*",
+  # Grammar build tooling. Its mutants come back as "no tests", which is noise: this runs
+  # at maintainer time to regenerate parsers, and a survivor there says nothing about
+  # whether the screener fails open.
   "src/sparkscreen/grammar/port.py",
   "src/sparkscreen/grammar/build.py",
+  "src/sparkscreen/grammar/spec.py",
 ]
 process_isolation = "forkserver"
 forkserver_warmup = "collect"
