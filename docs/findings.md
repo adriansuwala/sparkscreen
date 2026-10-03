@@ -277,16 +277,22 @@ expectation was not. Each was verified against CPython, the grammar, or a live e
 
 ## Known blind spots
 
-Measured, not guessed. All currently return ALLOW with zero findings:
+Measured, not guessed. All of these currently return ALLOW with zero findings:
 
 | input | why it is missed |
 |---|---|
-| `df.write.mode("overwrite").saveAsTable("prod.t")` | DataFrame API — never becomes SQL text |
-| `df.write.mode("overwrite").save("s3://bucket/x")` | same |
-| `df.write.jdbc("jdbc:postgresql://prod", "t", mode="overwrite")` | same, and reaches an external system |
-| `dbutils.fs.rm("/", recurse=True)` | Python-level, not analysed |
-| `shutil.rmtree("/data")` | Python-level |
-| `os.system("rm -rf /")` | Python-level |
+| `w = df.write` then `w.save("/data")` | the folder tracks string constants, not object bindings; `saveAsTable`/`insertInto` are unaffected because they match on callee name |
+| `dbutils.fs.rm("/", recurse=True)` | Python-level, deliberately out of scope |
+| `shutil.rmtree("/data")` | Python-level, out of scope |
+| `os.system("rm -rf /")` | Python-level, out of scope |
+| interprocedural constants (`def run(t): spark.sql(f"drop table {t}")`) | folding is intra-procedural by design; reported UNKNOWN, never guessed |
+| SQL arriving as a parameter rather than a literal | same — UNKNOWN |
+
+The DataFrame rows that used to sit at the top of this table
+(`df.write.mode("overwrite").saveAsTable(...)`, `.save(...)`, `.jdbc(...)`) were closed
+2026-10-02 in `sparkscreen-rn6`; the table is kept honest by re-measuring rather than by
+deleting the rows, because a stale "known gap" list is worse than none — it reads as
+current coverage. See [T5](threads.md#t5--should-dataframe-writes-be-screened).
 
 `Reason.PYTHON_DANGEROUS_CALL` was defined in the enum and **never raised** — a reason we
 never emitted, advertising capability we did not have. Removed 2026-10-02
@@ -296,8 +302,6 @@ exists. Python screening is a separate tool ([T4](threads.md#t4--pluggable-opera
 
 The lesson generalises: **an enum is a promise about what the code can produce.** A
 member that is never emitted makes the tool look more capable than it is.
-
----
 
 ## Process lessons
 
@@ -310,17 +314,16 @@ wrong for the next one, with nothing to say so. When a property is "this case is
 from the set" or "this case happens to be a direct child", prefer expressing it as a rule
 over the whole domain, and test the property by its name rather than by its example.
 
+**Measure the gap list; do not curate it.** The blind-spot table above still listed the
+three DataFrame write forms as unhandled for a full commit after they were fixed. The
+rows were not wrong when written and nothing about fixing them invalidated them — they
+simply stopped being true and said so. Re-derive the list from a probe rather than
+maintaining it by hand, which is the same argument as the enum one: a stale capability
+claim reads as a current one.
 
-Worth more than any individual bug, since they are what would have prevented the above:
+**Ask the real engine, not the grammar.** F6 (case-insensitivity) and the DataFrame
+write semantics both looked like defects in the grammar and were not. `caseInsensitive`
+came from Spark's own behaviour, and overwrite-versus-error came from executing a write
+and counting rows. The grammar is a good oracle for *shape* and a poor one for
+*meaning*.
 
-1. **Do not write one corpus and apply it to two grammars.** `$$abc$$` is a `codeLiteral`
-   in 4.0 and a syntax error in 3.5.1. `CALL`, `|>`, `BEGIN…END` are 4.0-only. This
-   produced several false failures during development.
-2. **Write test SQL in lowercase.** An all-uppercase corpus has a blind spot you cannot
-   see — see F6.
-3. **A wrong expectation is worse than a missing test.** It encodes a false belief that
-   survives until something depends on it.
-4. **Verify a subagent's claim before accepting it**, and ask for a reproducer. Three of
-   the four times an agent "found a bug", the bug was in the test.
-5. **A test suite that disagrees with you is working.** If every test passes the first
-   time, one of you is not trying.

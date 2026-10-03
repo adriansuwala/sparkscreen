@@ -36,10 +36,11 @@ Each issue carries its reasoning inline, so the "why" survives without needing
 
 ## Where we are
 
-`master` is green: **2,199 tests passing in ~15s**, 14 skipped, 8 xfailed (all documented
-gaps, none accidental). 40 differential expectations re-verified against a live Spark
-3.5.1. Wheel ships the parsers and runs with no JVM. Warm `screen()` is **10.4 ms**
-end-to-end, 8.1 ms of which is the ANTLR parse.
+`master` is green: **2,479 tests passing in ~16s**, 16 skipped, 8 xfailed (all documented
+gaps, none accidental). **51 differential expectations re-verified against a live Spark
+3.5.1** — 40 SQL plus 11 DataFrame, the latter asserting row counts actually drop on
+overwrite. Wheel ships the parsers and runs with no JVM. A 20-statement file screens in
+**5.5 ms** warm.
 
 Detected today, and only this:
 
@@ -48,8 +49,13 @@ Detected today, and only this:
   format specs — with real Python scoping, so shadowing and rebinding fail closed
 - Parsed with Spark's genuine grammar, two pinned versions, strict
 - Statement labels, table/namespace targets, string literals extracted from the parse tree
+- **DataFrame write sinks**: `saveAsTable`, `save`, `jdbc`, `insertInto`, with write
+  mode recovered (`overwrite` destroys, default errors out — both verified live)
+- **`Effect` flags per operation**: 122 mapped labels across both grammars, orthogonal
+  and fail-loud on an unmapped label
 - Declarative policy with namespace allowlists and resource limits
-- Three verdicts, fail-closed, with `confidence` and `analysis_failure` distinguishable
+- **Four verdicts** — `ALLOW` / `DENY` / `REVIEW` / `UNKNOWN` — so "we analysed it and a
+  human should look" is distinguishable from "we could not analyse it"
 
 Not detected: everything else. See
 [known blind spots](findings.md#known-blind-spots).
@@ -60,7 +66,11 @@ Not detected: everything else. See
 
 The DataFrame API is the largest remaining gap and the reason the `Effect` axis exists.
 
-### 1. `Effect` axis — in progress
+### 1. ~~`Effect` axis~~ — done (`0cc01f6`)
+
+Shipped. 122 labels mapped across both grammars, derived from the generated parser
+classes rather than a corpus, and `effects_for_label()` raises `UnmappedLabelError`
+rather than returning an empty set.
 
 Separate *what an operation does* from *what the policy decided*, per
 [D4](decisions.md#d4--effect-is-a-set-of-flags-not-an-enum). Orthogonal flags, derived
@@ -69,7 +79,14 @@ from the labels we already resolve, so it is additive rather than a rewrite.
 Everything else in this section has somewhere to put its results, which is why this goes
 first.
 
-### 2. DataFrame write detection — ~3h
+### 2. ~~DataFrame write detection~~ — done (`22ed358`)
+
+Shipped, with the oracle converted into assertions. `tests/differential/
+test_dataframe_writes.py` runs against a live Spark 3.5.1 and checks that an overwrite
+takes a target from 3 rows to 2, that an append takes it to 4, and that default mode
+raises `TABLE_OR_VIEW_ALREADY_EXISTS` and changes nothing. One limitation recorded as
+[T5b](threads.md#t5b--dataframe-writes-known-gap): an aliased writer (`w = df.write`) is
+missed for `.save`/`.jdbc`.
 
 `df.write.mode(...).saveAsTable(...)`, `.save(...)`, `.insertInto(...)`, `.jdbc(...)`,
 `.write.partitionBy(...).save(...)`.
@@ -108,15 +125,13 @@ far more trustworthy.
 
 ## Deferred
 
-### `REVIEW` / `UNKNOWN` verdict split — ~2h
+### ~~`REVIEW` / `UNKNOWN` verdict split~~ — done (`080fb93`)
 
-Today "we analysed it and a human should look" and "we could not analyse it" are both
-`UNKNOWN`. Separating them is a breaking JSON change and buys mainly better dashboard
-queries — which `is_analysis_failure` already partly provides. Deferred until someone
-actually wants the distinction in a query.
-
-Must not change the CLI exit codes: REVIEW and UNKNOWN both map to 2. Same gate, different
-queryable reason.
+Shipped. See [D18](decisions.md#d18--split-unknown-into-review-and-unknown-the-exit-code-stays-binary).
+The exit-code constraint held: `REVIEW` and `UNKNOWN` both exit 2, as the deferral note
+required. Doing it earlier than planned was justified by finding that
+`UNSUPPORTED_STATEMENT` had been sitting in the analysis-failure set all along, inflating
+the "could not analyse" rate with ordinary policy gaps.
 
 ### Adding Spark versions
 
@@ -126,6 +141,17 @@ tell you whether it agrees with the engine. The version-specific corpus entries
 do not put a 4.0-only statement in the shared corpus.
 
 ### Mutation testing at scale
+
+`mutmut-config.toml` exists and is scoped to the decision logic rather than the grammar
+port. Worth a real run to find assertions that do not bite.
+
+### Publishing — ~1h, no new code
+
+The wheel builds and is verified in a clean venv with `java` off `PATH`, carrying both
+grammar pairs. What is missing is the boring part: a real version number (it is still
+`0.1.0`), a `LICENSE`/author block check, a tagged release, and PyPI credentials. This is
+the shortest path from "works on my machine" to "installable", and it is the only item
+here that is not blocked on a design question.
 
 `mutmut-config.toml` exists and is scoped to the decision logic rather than the grammar
 port. Worth a real run to find assertions that do not bite.
@@ -163,4 +189,11 @@ without an oracle**, and that distinction is the one worth internalising:
 
 The general rule this project keeps rediscovering: **a test suite that can only check
 your reasoning has not found the bug you care about.** F6 was invisible to a complete,
-correct, 100%-passing corpus. Differential oracles are not a luxury here.
+correct, 100%-passing corpus. Differential oracles are not a luxury here| id | | |
+|---|---|---|
+| _(none open)_ | | the ledger is empty; all five seeded issues are closed |
+
+Every seeded issue is closed, with its reasoning inline on the issue rather than only in
+this file — which is the point of having a tracker. Closed: `rn6` (DataFrame writes),
+`120` (`DELETE`/`MERGE` destruction), `r50` (`LOAD DATA`), `znf` (Python scope),
+`dhe` (verdict split)..

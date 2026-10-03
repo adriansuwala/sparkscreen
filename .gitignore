@@ -1,33 +1,16 @@
-# virtualenvs / build
-.venv/
-.venv-*/
-venv/
-build/
+# build artefacts
 dist/
+build/
 *.egg-info/
 __pycache__/
 *.py[cod]
 
-# ANTLR tool jar cache -- downloaded on demand, large, and reproducible from
-# grammar/port.py's SUPPORTED_ANTLR_VERSION. Not committed.
-src/sparkscreen/grammar/.cache/
-src/sparkscreen/grammar/generated/._staging_*/
-
-# NOTE: src/sparkscreen/grammar/vendored/ and .../generated/ ARE committed.
-#   vendored/  -- pinned Spark .g4 files; committing them is what makes a build
-#                 reproducible and offline-capable, independent of upstream.
-#   generated/ -- the generated Python parsers, which ship in the wheel so that
-#                 neither install nor runtime needs a JVM.
-
-# test / coverage
+# pytest
 .pytest_cache/
-.hypothesis/
-.coverage
-coverage.xml
-htmlcov/
-.mutmut-cache/
 
-# editors / os
-.idea/
-.vscode/
-.DS_Storedist/
+# tooling databases (br's own .gitignore also covers .beads internals)
+.beads/*.db
+.beads/*.db-journal
+.beads/*.db-wal
+.beads/*.db-shm
+.beads/*.lock
