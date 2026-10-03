@@ -386,6 +386,85 @@ right". The general rule: **a tool failing in a specific, reproducible way is a 
 about a configuration, not a fact about the tool.** A hang is a symptom; the cause is
 still unknown until someone reads what the tool says about hangs.
 
+## F16 — a writer bound in both arms of an `if` loses its binding; `save`/`jdbc` report ALLOW
+
+Found while verifying T5b with a probe that deliberately did not go through the code under
+test. Recorded here rather than fixed, because the fix is in `folding.py` and the
+interprocedural-folding agent is working in that file in a parallel worktree.
+
+## Reproducer
+
+    if flag:
+        w = df.write
+    else:
+        w = df.write
+    w.save("/tmp/x")
+
+reports `ALLOW` with zero findings. `w.save("/tmp/x")` writes to the local filesystem.
+`w.jdbc(url, "t")` likewise reports `ALLOW` and reaches an external system.
+
+## Before and after T5b, measured
+
+| input | master | with T5b |
+|---|---|---|
+| `w = df.write; w.save("/tmp/x")` | `allow` | `review` |
+| two-arm `if`/`else`, then `w.save(...)` | `allow` | **`allow`** |
+| two-arm `if`/`else`, then `w.jdbc(...)` | `allow` | **`allow`** |
+
+So T5b closes the straight-line case and leaves the branch case open. The remaining gap is
+a branch-merge limitation in the folder, not an alias-resolution one.
+
+## Why it is narrow
+
+Only the operations that *require* a resolved binding are affected:
+
+| operation | verdict | why |
+|---|---|---|
+| `w.saveAsTable("prod.t")` | `review` | matched on method name; the receiver is not consulted |
+| `w.insertInto("prod.t", ...)` | `review` | same |
+| `w.mode("overwrite").saveAsTable(...)` | `deny` | `denies_regardless_of_namespace` fires on the effect |
+| `w.save("/tmp/x")` | **`allow`** | needs a resolved writer — the binding is lost at the merge |
+| `w.jdbc(url, "t")` | **`allow`** | same |
+
+The destructive table operations are still caught, by name-matching and effect policy, even
+when alias resolution fails. The exposure is the two operations with no PySpark-specific
+method name to fall back on — and `save` is a local filesystem write, which is the one the
+tool's own `READ_LOCAL_FS` / `WRITE_DATA` effects exist to flag.
+
+## Root cause, as far as it is pinned down
+
+The folder keeps one binding per name per scope, and the branch merge does not preserve a
+binding established inside a branch body. Single-arm binding fails the same way:
+
+    if flag:
+        w = df.write
+    w.save("/tmp/x")           # -> allow
+
+which is defensible on its own (the write may not execute), but it is indistinguishable
+from the two-arm case, which *should* resolve. That is the bug: the two are merged.
+
+## Expected fix
+
+Make the merge join bindings rather than discard them. If both arms bind a name to the same
+provable value, that value survives; if the arms disagree, the result is unresolved. Never
+assume a value for the disagreeing case.
+
+Then add the reproducer as a regression test asserting both directions: arms agree ->
+`review`; arms disagree -> `UNKNOWN`, not `ALLOW`.
+
+The failure mode to avoid is fixing this by reporting `UNKNOWN` for every unresolved writer.
+T5b deliberately leaves an unresolved alias silent so ordinary agent code does not drown in
+findings. The fix belongs in the merge, not in the reporting.
+
+## What the probe got wrong first
+
+The first version of the verification probe asserted that all ten rebinding constructs must
+stop resolving, and reported ten failures. Ten of ten "leaks" were the probe's fault:
+`saveAsTable` and `insertInto` are matched on method name with the receiver ignored, so they
+never consulted the binding in the first place. Testing invalidation requires an operation
+that *depends* on the binding — which is what made the real gap visible at all. A probe that
+appears to find ten bugs has usually found one misunderstanding.
+
 ## Process lessons
 
 **A correctness property held by an exception is not held.** Three bugs in this
