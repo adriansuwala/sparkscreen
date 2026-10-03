@@ -4,17 +4,23 @@ User documentation that lies is worse than none, and several claims in that file
 kind that rot silently -- a renamed enum member, a changed default, a default that was
 tweaked and the doc not updated.
 
-Run: PYTHONPATH=src .venv/bin/python _verify_docs.py
+Run: .venv/bin/python _verify_docs.py
 Not part of the test suite: this is a documentation audit, run by hand when usage.md
 changes. Promote it to a real test if the docs start drifting.
 """
 from __future__ import annotations
+import sys as _sys
+from pathlib import Path as _Path
+# Runnable as a bare script without PYTHONPATH=src, like any other entry point.
+_sys.path.insert(0, str(_Path(__file__).resolve().parent / "src"))
+
 
 import sys
 
 from sparkscreen import Effect, Verdict, read_only_policy, screen
 from sparkscreen.model import Reason
 from sparkscreen.policy import Limits, Policy, default_policy
+
 
 failures: list[str] = []
 

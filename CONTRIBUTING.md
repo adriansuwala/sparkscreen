@@ -54,8 +54,8 @@ say which claim and why it was wrong.
 
 ```bash
 pytest tests/ -q                        # fast suite; must pass before pushing
-python scripts/mutate.py               # mutation testing; --dry-run to count first
-python scripts/mutate.py --module model.py   # one module, ~1 min
+.venv/bin/mutmut run --max-children 4  # mutation testing
+.venv/bin/mutmut results                # survivors = assertions that do not bite
 ```
 
 Mutation testing is not optional for a change to `policy.py`, `model.py`, `screen.py` or
@@ -64,15 +64,21 @@ including an untested public API and an off-by-one on a limit boundary. Survivor
 measurement, not a failure: read them and decide whether the code is unreachable or the
 test is too weak.
 
-This replaces `mutmut`, which deadlocked on this project at scale. See the rationale at
-the top of `scripts/mutate.py`.
+Config is in `[tool.mutmut]` in `pyproject.toml` — mutmut 3 reads it only there, since
+`mutmut run` accepts no `--config` flag. `process_isolation = "forkserver"` is load-bearing:
+the default `fork` mode deadlocked on this project, and forkserver is mutmut's documented
+remedy for exactly that symptom.
+
+`scripts/mutate.py` also exists as a lighter cross-check with per-mutant test selection.
+Prefer `mutmut`; see the header of that file for why its own numbers are less trustworthy
+(its generator is line-based and skipped 127 of 244 mutants).
 
 Differential tests need a real engine and are opt-in:
 
 ```bash
 uv pip install --python .venv-pyspark/bin/python pyspark==3.5.1 \
     "antlr4-python3-runtime==4.13.1" pytest
-JAVA_HOME=/path/to/jre PYTHONPATH=src:. .venv-pyspark/bin/python -m pytest \
+JAVA_HOME=/path/to/jre .venv-pyspark/bin/python -m pytest \
     tests/differential -q
 ```
 

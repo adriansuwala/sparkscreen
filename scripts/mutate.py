@@ -1,27 +1,23 @@
 #!/usr/bin/env python3
 """Mutation testing for the decision logic, with per-mutant test selection.
 
-## Why this exists instead of `mutmut run`
+## Status: superseded by `mutmut`, which works fine
 
-Two reasons, both measured rather than assumed.
+This file was written after `mutmut run` appeared to deadlock here. **That diagnosis was
+wrong**, and the evidence for it is embarrassing in hindsight: mutmut's own documentation
+says to switch `process_isolation` to `"forkserver"` when a run hangs. I never read the
+section; I observed a hang, concluded the tool did not scale, and built a replacement.
 
-**1. `mutmut` 3.8.0 deadlocks on this project.** Started with `--max-children 4`, it
-stalled in `futex_do_wait` across all seven processes with 0% CPU and no log output past
-"Generating mutants". It works fine on a small project (verified on a 6-mutant toy
-repro), so this is scale-related, not a broken install. It was killed rather than left
-to burn hours.
+With `process_isolation = "forkserver"` set in `pyproject.toml`, mutmut runs this project
+without difficulty. Kept as a cross-check on mutmut rather than deleted, because two
+independent implementations disagreeing on what survives is worth something.
 
-**2. It cannot subset tests, and that is the actual cost driver.** There are ~790
-mutants across the four decision modules, and the full suite is ~43 s / 2,488 tests. No
-single test dominates the wall clock (the slowest is 3.5 s), so the cost is genuinely
-irreducible per mutant: 790 x 43 s / 4 workers is roughly 2.4 hours of pure test
-execution.
+## What it does differently from mutmut
 
-But a mutant in `model.py` is not sensitive to the DataFrame detector or the grammar
-port. Running `tests/test_dataframe_writes.py` against a changed verdict comparison is
-wasted work. This runner picks the tests that import the mutated module (plus the
-fail-closed invariant sweeps, which are the real contract), so a `model.py` mutant costs
-seconds instead of a minute.
+Per-mutant test selection. A mutant in `model.py` is not sensitive to the DataFrame
+detector or the grammar port, so running `tests/test_dataframe_writes.py` against a
+changed verdict comparison is wasted work. This runner picks the tests that import the
+mutated module, plus the fail-closed invariant sweeps.
 
 ## What it reports
 
@@ -32,6 +28,13 @@ seconds instead of a minute.
 `survived` is a *measurement*, not a failure of this tool. A survivor in `screen.py` is
 the expensive kind -- that is the aggregation path which has already produced one
 production bug (F1, `Report.verdict` aggregating on `reason`).
+
+## Known limitation, and why mutmut is now preferred
+
+The mutation generator is line-based: it skips any mutation on a line it cannot apply
+confidently rather than guessing. On this project that silently skipped **127 of 244
+mutants** -- over half. mutmut uses libcst and rewrites the real parse tree, so it both
+generates more mutants (3,209 vs 244) and applies all of them. Prefer `mutmut run`.
 
 ## Usage
 

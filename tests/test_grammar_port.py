@@ -51,6 +51,7 @@ from sparkscreen.grammar.port import (
 from sparkscreen.grammar.spec import GENERATED, SPECS, GrammarSpec, port_to_python
 
 REPO = Path(__file__).resolve().parents[1]
+from _helpers import is_source_checkout
 
 # --- text utilities ----------------------------------------------------------
 # The port works on raw grammar text, so the same three things have to come off
@@ -609,6 +610,8 @@ def test_antlr_jar_is_not_required_because_it_is_gitignored():
     Deliberately does not delete or move the local jar -- it only asserts the
     repository does not depend on it being there.
     """
+    if not is_source_checkout(REPO):
+        pytest.skip(f"not a source checkout: {REPO} lacks .gitignore")
     gitignore = (REPO / ".gitignore").read_text()
     assert "src/sparkscreen/grammar/.cache/" in gitignore
     tracked = subprocess.run(
@@ -626,6 +629,8 @@ def test_parser_imports_and_parses_with_no_java_on_path():
     """
     import tempfile
 
+    if not (REPO / ".venv").is_dir():
+        pytest.skip(f"no project venv under {REPO}; this asserts a local install")
     with tempfile.TemporaryDirectory() as home:
         env = {"PATH": "/nonexistent", "HOME": home, "PYTHONPATH": "src",
                "PYTHONDONTWRITEBYTECODE": "1"}

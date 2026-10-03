@@ -5,9 +5,14 @@ safety property is only worth as much as its verification, so this checks the on
 that matter rather than restating them.
 
 Not part of the pytest suite: a design audit. Promote it if the Effect API churns.
-Run: PYTHONPATH=src .venv/bin/python _verify_effect.py
+Run: .venv/bin/python _verify_effect.py
 """
 from __future__ import annotations
+import sys as _sys
+from pathlib import Path as _Path
+# Runnable as a bare script without PYTHONPATH=src, like any other entry point.
+_sys.path.insert(0, str(_Path(__file__).resolve().parent / "src"))
+
 
 from sparkscreen import (
     Effect,
@@ -20,6 +25,7 @@ from sparkscreen import (
     screen,
 )
 from sparkscreen.analysis.effects import UnmappedLabelError, effects_for_label
+
 
 failures: list[str] = []
 

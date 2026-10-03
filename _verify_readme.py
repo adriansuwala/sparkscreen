@@ -10,11 +10,17 @@ Every code example and every number here is executed or measured.
 Run: PYTHONPATH=src .venv/bin/python _verify_readme.py
 """
 from __future__ import annotations
+import sys as _sys
+from pathlib import Path as _Path
+# Runnable as a bare script without PYTHONPATH=src, like any other entry point.
+_sys.path.insert(0, str(_Path(__file__).resolve().parent / "src"))
+
 
 import pathlib
 import re
 import subprocess
 import sys
+
 
 ROOT = pathlib.Path(__file__).parent
 failures: list[str] = []

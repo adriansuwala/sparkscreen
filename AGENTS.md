@@ -39,21 +39,24 @@ codes.
 Two virtualenvs. This trips up everyone.
 
 ```bash
-# .venv — fast suite, no JVM, ~16s. Use this for everything by default.
-PYTHONPATH=src .venv/bin/python -m pytest tests/ -q
+# .venv — fast suite, no JVM, ~20s. Use this for everything by default.
+# No PYTHONPATH needed anywhere: `pythonpath = ["src"]` in [tool.pytest.ini_options]
+# makes it work in both venvs, verified against live Spark 3.5.1.
+.venv/bin/python -m pytest tests/ -q
 
 # .venv-pyspark — only for the differential suite. Has pyspark==3.5.1.
 # The main .venv deliberately has NO pyspark.
 export JAVA_HOME=$(ls -d /opt/data/home/.jre/*)
-PATH="$JAVA_HOME/bin:$PATH" PYTHONPATH=src .venv-pyspark/bin/python \
+PATH="$JAVA_HOME/bin:$PATH" .venv-pyspark/bin/python \
     -m pytest tests/differential/ -q
 ```
 
 Docs audits are separate scripts, not part of the suite:
 
 ```bash
-PYTHONPATH=src .venv/bin/python _verify_docs.py    # 45 claims in docs/user-docs/
-PYTHONPATH=src .venv/bin/python _verify_effect.py  # 24 Effect-design claims
+.venv/bin/python _verify_docs.py    # 45 claims in docs/user-docs/
+.venv/bin/python _verify_effect.py  # 24 Effect-design claims
+.venv/bin/python _verify_readme.py  # 38 claims in README.md
 ```
 
 Issue ledger is `br` (beads). `br list --status open`; the DB is gitignored but
@@ -67,11 +70,12 @@ SQLite DB and will silently disagree with a hand-edited JSONL.
 ## Current state (2026-10-03)
 
 - 0.8.0 — pre-1.0; see `sparkscreen.VERSION_NOTES` for why
-- 2,501 tests passing, 16 skipped, 8 xfailed (all documented gaps)
+- 2,504 tests passing, 17 skipped, 8 xfailed (all documented gaps)
 - 51 differential expectations against live Spark 3.5.1
 - 122 statement labels mapped to `Effect` flags across both pinned grammars
 - 5.5 ms for a 20-statement file, warm
-- Mutation-tested over the decision logic: `python scripts/mutate.py`
+- Mutation-tested with mutmut: `.venv/bin/mutmut run --max-children 4`
+  (config in `[tool.mutmut]`; `process_isolation = "forkserver"` is required — see F15)
 
 ## Invariants you must not break
 

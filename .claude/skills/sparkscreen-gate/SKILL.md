@@ -90,7 +90,7 @@ looked like grammar defects and were not:
 
 ```bash
 export JAVA_HOME=$(ls -d /opt/data/home/.jre/*)
-PATH="$JAVA_HOME/bin:$PATH" PYTHONPATH=src .venv-pyspark/bin/python \
+PATH="$JAVA_HOME/bin:$PATH" .venv-pyspark/bin/python \
     -m pytest tests/differential/ -q
 ```
 

@@ -19,6 +19,8 @@ import pytest
 
 import sparkscreen
 
+from _helpers import is_source_checkout
+
 ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = tomllib.loads((ROOT / "pyproject.toml").read_text())
 
@@ -41,6 +43,8 @@ class TestVersionAgreement:
                             sparkscreen.__version__), sparkscreen.__version__
 
     def test_egg_info_is_gitignored(self):
+        if not is_source_checkout(ROOT):
+            pytest.skip(f"not a source checkout: {ROOT}")
         ignore = (ROOT / ".gitignore").read_text()
         assert "*.egg-info/" in ignore
         tracked = subprocess.run(
@@ -132,6 +136,16 @@ class TestWheelContents:
         import os
         import subprocess as sp
         import sys as _sys
+
+        # During a mutation run this whole directory IS mutmut's instrumented copy: every
+        # file in src/ has had `from mutmut.mutation.trampoline import ...` spliced into
+        # it. Building a wheel from here bakes that import into the artefact, and the
+        # freshly-created venv then dies with `No module named 'mutmut'`.
+        #
+        # The assertion is still worth having, but not from an instrumented tree -- it
+        # would be testing the trampoline, not the wheel.
+        if not is_source_checkout(ROOT):
+            pytest.skip("mutation run: src/ is instrumented, so this wheel is not the real one")
 
         venv = tmp_path / "venv"
         sp.run(["uv", "venv", str(venv), "-q"], check=True, capture_output=True)

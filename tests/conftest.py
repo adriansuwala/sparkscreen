@@ -8,6 +8,7 @@ import pytest
 
 from sparkscreen.grammar.spec import SPECS
 
+# pytest injects conftest symbols into every test module's namespace.
 SPEC_KEYS = [s.key for s in SPECS]
 SPARK_VERSIONS = sorted({v for s in SPECS for v in s.spark_versions})
 

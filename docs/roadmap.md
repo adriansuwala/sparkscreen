@@ -140,50 +140,43 @@ tell you whether it agrees with the engine. The version-specific corpus entries
 (`VERSION_SPECIFIC`, `VERSION_SPECIFIC_REJECTED`) are where the expected differences go —
 do not put a 4.0-only statement in the shared corpus.
 
-### Mutation testing — done, three survivors recorded
+### Mutation testing — mutmut, running at full scale
 
 Agreed and in progress. The argument is exactly your framing: this tests the tests.
 For a screener the mutation that matters is `DENY` -> `ALLOW`, and no amount of coverage
 finds it, because the line still executes — it just returns the wrong answer.
 
 ```bash
-.venv/bin/python scripts/mutate.py            # ~244 mutants over the decision logic
-.venv/bin/python scripts/mutate.py --dry-run  # count without running
-.venv/bin/python scripts/mutate.py --module model.py
+.venv/bin/mutmut run --max-children 4   # ~3,200 mutants over the decision logic
+.venv/bin/mutmut results                 # survivors = assertions that do not bite
 ```
 
-244 mutants, ~2 min with per-module test selection (4 workers). The earlier estimate of
-790 came from a rough AST count taken before the real enumerator existed, and predates
-mutmut being abandoned.
+**Correction: mutmut was never broken here.** It appeared to deadlock — seven processes at
+0% CPU in `futex_do_wait`, no output past "Generating mutants` — and I concluded the tool
+did not scale, then built `scripts/mutate.py` to replace it. The actual cause was never
+reading the linked section of mutmut's own documentation, which says to set
+`process_isolation = "forkserver"` when a run hangs. With that one line it runs without
+difficulty. The lesson is recorded as F15: *a tool failing in a specific way is a
+hypothesis about a configuration, not a fact about the tool.*
 
-A survivor in `model.py` or `policy.py` is a real screener bug; a survivor in `screen.py`
-is the expensive kind, since that is the aggregation path that has already produced one
-production bug (F1). The next extensions are `folding.py` and `calls.py`, which decide
-what SQL gets screened at all.
+Two genuine test bugs surfaced while wiring it up, both worth having found either way:
 
-Read it as a *measurement*, not a gate: a high survivor count in a module means its
-tests need strengthening, not that the module is wrong.
+- `pythonpath = ["src"]` is now set in `[tool.pytest.ini_options]`. The suite passed by
+  hand only because `PYTHONPATH=src` was set in the shell; any tool spawning pytest as a
+  subprocess inherited nothing and got `ModuleNotFoundError`.
+- Four tests assert properties of *the git checkout* (`.gitignore`, the index, a built
+  wheel), so they fail in any copied tree. They now skip outside a checkout via
+  `is_source_checkout()`.
 
-Superseded by `scripts/mutate.py`, which replaced `mutmut` (it deadlocked at this scale)
-and additionally subsets tests per mutant. 244 mutants over the decision logic; 113 of
-the 117 applicable were killed. It found four real gaps, all now fixed and tested:
-an entirely unasserted public API (`has_effect`), and the `>` vs `>=` boundary on all
-four resource limits.
+`scripts/mutate.py` stays as a lighter cross-check, but its numbers are the less
+trustworthy of the two: its generator is line-based and skipped 127 of 244 mutants, where
+mutmut's libcst rewrite applies all of them and generates 3,209.
 
-**Three survivors remain**, all in the DataFrame path and all recorded rather than fixed:
+Read survivors as a *measurement*, not a gate: a high count in a module means its tests
+need strengthening, not that the module is wrong. A survivor in `model.py` or `policy.py`
+is a real screener bug; a survivor in `screen.py` is the expensive kind, since that is the
+aggregation path which has already produced one production bug (F1).
 
-| site | mutation | why it survives |
-|---|---|---|
-| `screen.py:201` | `target_known and target` -> `or` | an unknown target would be reported as known |
-| `screen.py:255` | `if readable_namespaces` -> `if not` | the check would run with no allowlist configured |
-| `screen.py:368` | `f.verdict is wanted` -> `is not` | `_combine` could pick the wrong primary finding |
-
-Each needs a test written deliberately against real behaviour rather than inferred from
-the mutation. That is the next piece of work.
-
-Not yet covered: `folding.py` and `calls.py`. They decide *what SQL gets screened at
-all*, so a survivor there is the expensive kind. Extending them is mechanical — add the
-module to `MODULE_TESTS` and pick the tests that guard it.
 
 ### Publishing — ~1h, no new code
 

@@ -8,10 +8,10 @@ description: Use when changing sparkscreen internals -- adding a label, policy r
 ## Two venvs
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/ -q     # fast, no JVM, ~16s
+.venv/bin/python -m pytest tests/ -q                      # fast, no JVM, ~20s
 
 export JAVA_HOME=$(ls -d /opt/data/home/.jre/*)
-PATH="$JAVA_HOME/bin:$PATH" PYTHONPATH=src .venv-pyspark/bin/python \
+PATH="$JAVA_HOME/bin:$PATH" .venv-pyspark/bin/python \
     -m pytest tests/differential/ -q                     # needs pyspark 3.5.1
 ```
 
@@ -79,12 +79,14 @@ screener raises. An assertion that cannot fail is worse than no test.
 ## Mutation testing
 
 ```bash
-.venv/bin/python scripts/mutate.py   # ~244 mutants over the decision logic
-.venv/bin/python scripts/mutate.py --module model.py
+.venv/bin/mutmut run --max-children 4   # ~3,200 mutants; config in pyproject.toml
+.venv/bin/mutmut results                 # survivors = assertions that do not bite
 ```
 
-Use this, **not** `mutmut run`: mutmut 3.8.0 deadlocks on this project at scale, and it
-cannot subset tests per mutant, which is the actual cost driver.
+Use `mutmut`, not `scripts/mutate.py`. An earlier note here said mutmut deadlocked at
+scale and was unusable — **that was wrong**, and the cause was not reading the docs:
+`process_isolation = "forkserver"` in `[tool.mutmut]` is mutmut's own prescribed remedy for
+a hanging run. `scripts/mutate.py` remains only as a lighter cross-check.
 
 Scoped to decision logic on purpose. A survivor in `model.py` is a screener bug that could
 turn `DENY` into `ALLOW` — exactly the thing coverage cannot see, because the line still

@@ -70,9 +70,13 @@ say "Fast environment ($FAST_VENV) — tests, no JVM required"
 if [ "$CHECK" = 1 ]; then
   [ -d "$FAST_VENV" ] || die "$FAST_VENV missing; run without --check"
   PYTHONPATH=src "$FAST_VENV/bin/python" -c "import sparkscreen, antlr4; print('    imports OK, version', sparkscreen.__version__)"
-  if PYTHONPATH=src "$FAST_VENV/bin/python" -c "import pyspark" 2>/dev/null; then
+  # PYTHONPATH is needed for `python -c` here but not for `pytest`: pythonpath=["src"] in
+  # [tool.pytest.ini_options] only applies to the latter.
+  if "$FAST_VENV/bin/python" -c "import pyspark" 2>/dev/null; then
     warn "pyspark IS installed in $FAST_VENV -- it should not be. The differential"
     warn "suite belongs in $DIFF_VENV. Harmless, but it slows the fast loop."
+  else
+    say "    pyspark correctly absent from the fast venv"
   fi
 else
   [ -d "$FAST_VENV" ] || uv venv "$FAST_VENV" --python "$PY"
@@ -100,7 +104,7 @@ fi
 
 if [ "$FULL" = 0 ]; then
   say "Done. Next:"
-  echo "    PYTHONPATH=src $FAST_VENV/bin/python -m pytest tests/ -q"
+  echo "    $FAST_VENV/bin/python -m pytest tests/ -q"
   echo "    ./scripts/setup.sh --full     # adds the differential suite"
   exit 0
 fi
@@ -140,7 +144,7 @@ if [ "$CHECK" = 0 ]; then
   "$DIFF_VENV/bin/python" -c "import pyspark; print('    pyspark', pyspark.__version__)"
   if [ -n "$JAVA_HOME_FOUND" ]; then
     say "Differential suite (first run builds a Spark session, so this takes a minute)"
-    PYTHONPATH=src "$DIFF_VENV/bin/python" -m pytest tests/differential/ -q \
+    "$DIFF_VENV/bin/python" -m pytest tests/differential/ -q \
       -p no:cacheprovider 2>&1 | tail -3
   fi
 fi
@@ -159,8 +163,8 @@ else
 fi
 
 say "Done"
-echo "  fast suite:  PYTHONPATH=src $FAST_VENV/bin/python -m pytest tests/ -q"
+echo "  fast suite:  $FAST_VENV/bin/python -m pytest tests/ -q"
 if [ -n "$JAVA_HOME_FOUND" ]; then
-  echo "  live Spark:  JAVA_HOME=$JAVA_HOME_FOUND PYTHONPATH=src $DIFF_VENV/bin/python -m pytest tests/differential/ -q"
+  echo "  live Spark:  JAVA_HOME=$JAVA_HOME_FOUND $DIFF_VENV/bin/python -m pytest tests/differential/ -q"
 fi
 echo "  doc audits:  _verify_docs.py, _verify_effect.py, _verify_agents.py"

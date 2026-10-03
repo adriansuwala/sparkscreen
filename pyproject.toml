@@ -79,9 +79,41 @@ include = ["sparkscreen*"]
   "grammar/generated/**/*.interp",
 ]
 
+[tool.mutmut]
+# Mutation testing. Config lives here because that is where mutmut 3 reads it from --
+# it has no --config flag; `mutmut run` accepts only --max-children.
+#
+# `process_isolation = "forkserver"` is load-bearing, not a preference. With the default
+# "fork", every worker inherits mutmut's main process, which has already imported pytest
+# and collected the suite. On this project that deadlocked: seven processes sat at 0% CPU
+# in futex_do_wait with no output past "Generating mutants", at ~790 mutants. forkserver
+# keeps the main process free of pytest and forks from a dedicated server instead. Mutmut's
+# own docs prescribe this switch precisely for a hanging run.
+#
+# Scoped to the decision logic. The generated ANTLR parsers are hundreds of thousands of
+# lines that no test meaningfully asserts against line-by-line.
+#
+# `source_paths` controls what mutmut COPIES into mutants/ *and* what it may mutate.
+# Listing individual modules therefore copies only those modules, and the copied tree then
+# fails to import (`No module named 'sparkscreen.grammar'`). So name the package, and
+# narrow the target with do_not_mutate.
+source_paths = ["src/sparkscreen"]
+do_not_mutate = [
+  "src/sparkscreen/grammar/generated/*",
+  "src/sparkscreen/grammar/port.py",
+  "src/sparkscreen/grammar/build.py",
+]
+process_isolation = "forkserver"
+forkserver_warmup = "collect"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+# Make `src/` importable without PYTHONPATH=src. This is not cosmetic: mutmut spawns
+# pytest in child processes that did not inherit the parent shell's PYTHONPATH, so the
+# suite failed there with ModuleNotFoundError while passing fine by hand. Anything that
+# runs the suite as a subprocess needs this to work.
+pythonpath = ["src"]
 markers = [
   "slow: long-running tests (needs pyspark and a JVM)",
   "fuzz: property-based tests",

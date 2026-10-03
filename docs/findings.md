@@ -352,6 +352,40 @@ exists. Python screening is a separate tool ([T4](threads.md#t4--pluggable-opera
 The lesson generalises: **an enum is a promise about what the code can produce.** A
 member that is never emitted makes the tool look more capable than it is.
 
+## F15 — I declared a battle-tested tool broken without reading its docs
+
+`mutmut run` appeared to deadlock on this project: seven processes at 0% CPU, all in
+`futex_do_wait`, no output past `Generating mutants`. I confirmed mutmut worked on a
+6-mutant toy reproduction, concluded "scale-related, not a broken install", killed the
+run, and spent real effort writing `scripts/mutate.py` to replace it — 322 lines, a custom
+mutant generator, per-module test selection, a --dry-run mode.
+
+The fix was one line of configuration: `process_isolation = "forkserver"`. Mutmut's
+documentation says, in the section on process isolation, to switch to forkserver if your
+run hangs. It runs this project without difficulty. 3,209 mutants versus 244.
+
+**Why the diagnosis felt convincing, and why that is the danger.** The toy reproduction
+was real evidence and it pointed the wrong way: a 6-mutant project has no fork pressure,
+so "works small, hangs large" looked like a scale limit in the tool. It was equally
+consistent with "there is a configuration for large runs that I did not know about". I
+had evidence that ruled out *one* explanation and treated it as if it ruled out the rest.
+Confirming a failure is cheap; the failure mode was skipping the confirmation.
+
+**The replacement was worse and I could have known that.** `scripts/mutate.py`'s generator
+is line-based and declines to mutate anything it cannot apply confidently. It silently
+skipped 127 of its own 244 mutants — over half — and reported the survivors without ever
+saying that. A hand-rolled tool competing with a mature one needs an independent check on
+its own output; the absence of one is not evidence of correctness. Its five "real"
+survivors in the first run were also a subset of the wrong answer, since a survivor only
+means something if the mutation was actually applied.
+
+**What I should have done, in order:** read the tool's own docs before declaring it
+inadequate; run its `results`/diagnostic command rather than inferring from `ps`; and treat
+"this well-known tool fails here" as a claim needing the same scepticism as "my code is
+right". The general rule: **a tool failing in a specific, reproducible way is a hypothesis
+about a configuration, not a fact about the tool.** A hang is a symptom; the cause is
+still unknown until someone reads what the tool says about hangs.
+
 ## Process lessons
 
 **A correctness property held by an exception is not held.** Three bugs in this
