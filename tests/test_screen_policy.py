@@ -252,22 +252,27 @@ class TestUnknownVerdicts:
         assert not report.ok
         assert reasons(report) == {Reason.UNRESOLVED_DYNAMIC_SQL}
 
-    def test_sink_inside_a_function_is_unresolved_even_with_literal_callers(
+    def test_sink_inside_a_function_is_unresolved_when_a_caller_is_dynamic(
         self, spec_key
     ):
-        """Known interprocedural gap; recorded here so the fail-closed path is pinned.
+        """One dynamic caller is enough to keep the whole function unresolved.
 
-        folding.py documents that it does not thread constants into function
-        bodies. The screener must therefore report UNKNOWN, not ALLOW.
+        `def run(tbl): spark.sql(f"drop table {tbl}")` called with a literal *and*
+        with a variable is genuine ambiguity: the body runs with both values, so
+        naming either one would be a specific, wrong finding. This is the fail-closed
+        path that survives interprocedural propagation -- see
+        `tests/test_interproc_folding.py` for what it replaces.
         """
         source = (
             "def run(tbl):\n"
             "    spark.sql(f'drop table {tbl}')\n"
             "run('prod.users')\n"
+            "run(input())\n"
         )
         report = screen(source, spec=spec_key)
         assert report.verdict is Verdict.UNKNOWN
         assert not report.ok
+        assert reasons(report) == {Reason.UNRESOLVED_DYNAMIC_SQL}
 
     def test_sql_built_from_a_dict_lookup_is_unknown(self, spec_key):
         source = "spark.sql(TEMPLATES['drop'])\n"
