@@ -83,16 +83,18 @@ import sparkscreen
 from sparkscreen.grammar.spec import SPECS
 assert len(SPECS) >= 2, 'expected both pinned grammars'
 print('    version   ', sparkscreen.__version__)
-print('    grammars  ', ', '.join(sorted(SPECS)))
+print('    grammars  ', ', '.join(sorted(s.key for s in SPECS)))
 "
-  # The generated parsers are committed on purpose. If they are missing, the package
-  # imported above would already have failed, so reaching here means they are present.
+  # The generated parsers are committed on purpose. If they were missing the import
+  # above would already have failed, so reaching here proves the modules are present;
+  # this second check proves they are *usable*, which is the claim that actually matters
+  # for a wheel with no JVM.
   PYTHONPATH=src "$FAST_VENV/bin/python" -c "
-from sparkscreen.grammar.spec import get_spec
-for k in ('spark-4.0','spark-3.5.1'):
-    m = get_spec(k).import_parser()
-    assert m is not None
-print('    parsers import from the wheel payload, no JVM needed')
+from sparkscreen.grammar.parser import SparkParser
+for key in ('spark-4.0', 'spark-3.5.1'):
+    parsed = SparkParser(key).parse('select 1')
+    assert parsed is not None, key
+print('    parsers load and parse, no JVM needed')
 "
 fi
 
