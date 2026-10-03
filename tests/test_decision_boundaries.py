@@ -772,17 +772,27 @@ class TestPolicyLabelDriftAccumulates:
         Assigning instead of accumulating keeps only the *last* rule's labels, so a
         policy whose first deny rule covers two labels reports both of them as
         uncovered -- the opposite of what the report is for.
+
+        The second rule has to contribute a label of its own, and that label has to be
+        non-destructive so it survives into `deny_rules_only`. A first attempt used
+        `CacheTable`, which `policy_label_drift` filters out as destructive: the result
+        came back identical either way and the mutant survived, because the only labels
+        reaching the assertion were already the last rule's. `ShowTables` is the
+        non-destructive one, so it is the first rule's contribution that is at stake.
         """
         policy = Policy(name="c", rules=[
             Rule(id="d1", verdict=Verdict.DENY, reason=Reason.DENY_RULE, message="m1",
                  severity=Severity.HIGH, labels=("ShowTables", "DescribeQuery")),
             Rule(id="d2", verdict=Verdict.DENY, reason=Reason.DENY_RULE, message="m2",
-                 severity=Severity.HIGH, labels=("CacheTable",)),
+                 severity=Severity.HIGH, labels=("DescribeQuery",)),
         ])
         result = policy_label_drift(policy)
-        # CacheTable is destructive so it is filtered out of deny_rules_only; the two
-        # labels from the *first* rule are the ones a non-accumulating version loses.
-        assert "ShowTables" in result["deny_rules_only"]
+        # `ShowTables` appears only on the FIRST rule, so it is present if and only if
+        # the labels accumulated across rules. `DescribeQuery` is on both, and cannot
+        # distinguish the two implementations on its own.
+        assert "ShowTables" in result["deny_rules_only"], (
+            f"first rule's labels were lost; got {result['deny_rules_only']}"
+        )
         assert "DescribeQuery" in result["deny_rules_only"]
 
     def test_the_documented_keys_are_present(self):
