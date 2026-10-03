@@ -21,6 +21,30 @@ different question from the SQL path, and the distinction is the whole design:
 The live-Spark oracle that pins these semantics is
 `tests/differential/probe_dataframe_oracle.py`; `tests/differential/test_dataframe_
 writes.py` asserts the classification against a real session.
+
+Aliased writers
+---------------
+
+`w = df.write` followed by `w.saveAsTable("prod.t")` is the same write written
+differently, and PySpark's own examples use that shape. A receiver that is a bare
+`Name` therefore has to be resolved -- but only when it is *provable*, because the
+alternative is to read a stale binding and report a clean, specific, wrong finding.
+
+`_WriteFinder` resolves those names by reusing the constant folder's scope machinery
+rather than reimplementing it (see its docstring for why subclassing beats a second
+copy). It inherits the folder's answer on the question that decides whether an alias
+is trustworthy at all: a name rebound by a loop target, a `with`, a parameter, an
+augmented assignment, a `global` or a `del` loses its value. So a parameter, a loop
+variable, a dict lookup and a rebinding all stay unresolved, and an unresolved alias
+produces exactly what the code produced before aliases existed -- never an ALLOW.
+
+Resolving an alias also *creates* a hazard that direct `df.write...` chains do not
+have: a DataFrameWriter is a mutable builder, so `w.mode("overwrite")` on its own line
+mutates the object `w` still points at, and a later `w.save(path)` really is an
+overwrite. A chain walk bottoms out at a bare `Name` and cannot see that, so when it
+does, the mode is reported unknown -- which routes to REVIEW, never to ALLOW. Missing
+the mode would be a false ALLOW on a destructive write, which is the one failure this
+tool exists to prevent.
 """
 
 from __future__ import annotations
@@ -29,7 +53,7 @@ import ast
 from dataclasses import dataclass
 
 from ..model import Effect
-from .folding import SinkKey, StringFolder
+from .folding import MISSING, SinkKey, StringFolder
 
 #: Terminal methods that perform a write. The names are matched on the *last* attribute
 #: of the call, so `df.write.saveAsTable(...)` ends in `saveAsTable`.
@@ -51,6 +75,26 @@ CHAIN_METHODS = frozenset({"mode", "format", "partitionBy", "option", "options"}
 #: The one save mode that destroys existing data. Spark's modes are append / overwrite /
 #: error / errorifexists / ignore; only `overwrite` replaces what is there.
 OVERWRITE_MODE = "overwrite"
+
+
+#: How far to walk a `.write` receiver before giving up. Matches the receiver-chain
+#: depth limit in `_chain_has_write`; both guard against a pathological AST rather than
+#: against anything real, and both fail in the safe direction (no alias resolved).
+MAX_ALIAS_DEPTH = 32
+
+
+class _Writer:
+    """The folded value of an expression that provably produces a DataFrameWriter."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<DataFrameWriter>"
+
+
+#: Folded result for `df.write` and friends. Distinct from every string constant, so a
+#: binding can never be mistaken for one.
+_WRITER = _Writer()
 
 
 @dataclass(frozen=True)
@@ -84,19 +128,110 @@ def find_dataframe_writes(
     Sharing the folder is what makes `mode = "overwrite"; df.write.mode(mode)...` work
     and, more importantly, what makes a shadowed variable resolve to UNKNOWN rather than
     to a stale binding from an outer scope.
+
+    Writer aliases (`w = df.write; w.save(...)`) are resolved from the finder's own
+    scope machinery, which it borrows from the constant folder rather than
+    reimplementing -- see `_WriteFinder`.
     """
     finder = _WriteFinder(folder)
     finder.visit(tree)
     return finder.writes
 
 
-class _WriteFinder(ast.NodeVisitor):
+class _WriteFinder(StringFolder):
+    """Find DataFrame writes, and track the writer aliases they arrive through.
+
+    Subclasses the constant folder rather than reimplementing scope tracking, and that
+    is the whole design. The question "may I trust this binding?" is not specific to
+    strings -- it is the project's central rule that *a stale binding is worse than no
+    binding*, and the folder already answers it for every construct that can rebind a
+    name: loop targets, `with`, parameters, augmented assignment, `global`/`nonlocal`,
+    `del`, imports, `match` captures, comprehension variables, and bodies that may
+    never run. A second implementation of that list here would be a second place for
+    it to drift, and the drift would be fail-open.
+
+    Inheriting is also why this is one pass rather than two. The finder and the alias
+    binder both need source order, and a whole-tree traversal of a DataFrame-heavy file
+    is most of this module's cost; running the binder as its own visitor doubled it.
+
+    Note what is *not* inherited. This instance's frame tables hold writers, not SQL
+    text, and it never calls `fold()` on its own state -- `self.folder` is the separate
+    constant folder `screen()` passed in, and that one does the SQL folding. Mixing them
+    would let `spark.sql(w)` fold a writer to the string `"<DataFrameWriter>"` and be
+    reported as resolved SQL: a false assurance of exactly the kind this tool exists to
+    refuse.
+    """
+
     def __init__(self, folder: StringFolder) -> None:
+        super().__init__()
+        #: The constant folder for SQL text. Never used for writer bindings.
         self.folder = folder
         self.writes: list[DataFrameWrite] = []
         self._ordinal = 0
 
+    # -- writer aliases ----------------------------------------------------
+
+    def _value(self, node: ast.AST, depth: int) -> object:
+        """Fold a whole right-hand side to a writer, or to nothing.
+
+        Depth 0 is the binding statement's right-hand side, which is the only position
+        anything is ever bound from. Nested positions (an f-string field, a `+` operand)
+        deliberately do not resolve: nothing binds through them, and letting the
+        sentinel leak into a string there would put a fabricated constant in the table.
+        """
+        if depth == 0 and self._is_writer_expr(node):
+            return _WRITER
+        return MISSING
+
+    def _is_writer_expr(self, node: ast.AST, depth: int = 0) -> bool:
+        """True if `node` provably evaluates to a DataFrameWriter."""
+        if depth > MAX_ALIAS_DEPTH:
+            return False
+        if isinstance(node, ast.Attribute):
+            # Only the `.write` attribute itself. `self.df.write` and
+            # `spark.table("x").write` are both this branch -- the receiver's shape
+            # does not matter, which is the same trust the chain walk places in a
+            # `.write` anywhere in a receiver.
+            #
+            # Deliberately *not* "any attribute on a writer": `w.format` is a bound
+            # method, not a writer, and admitting it would let `x = w.format` resolve
+            # as one.
+            return node.attr == "write"
+        if isinstance(node, ast.Name):
+            # An alias of an alias (`w = df.write; w2 = w`). Still provable, still the
+            # same object, so it stays a writer.
+            return self._lookup(node.id) is _WRITER
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            # The writer builder returns self from every configuration call, so
+            # `df.write.mode("overwrite")` is the writer -- but the mode is *not*
+            # carried, and deliberately so: knowing the object does not tell us which
+            # mode it was last put into, so the caller reports the mode unknown.
+            if node.func.attr not in CHAIN_METHODS:
+                return False
+            return self._is_writer_expr(node.func.value, depth + 1)
+        return False
+
+    def _is_writer_name(self, node: ast.AST | None) -> bool:
+        """True if `node` is a `Name` that provably holds a writer right here.
+
+        Asked live rather than from a table built in an earlier pass, and the timing is
+        what makes it correct: this runs while the enclosing scopes are still on the
+        frame stack, so a function parameter shadows the module binding for the length
+        of the function body and no longer. `w = df.write` followed by
+        `def g(w): w.save(...)` therefore does not resolve `g`'s parameter -- which is
+        the whole point, since the module binding is stale inside `g`.
+
+        It is asked from `visit_Call`, which runs *before* `generic_visit` descends to
+        the receiver, so nothing here may depend on the receiver having been visited.
+        """
+        return isinstance(node, ast.Name) and self._lookup(node.id) is _WRITER
+
+    # -- recognising a write ----------------------------------------------
+
     def visit_Call(self, node: ast.Call) -> None:
+        # Deliberately does *not* call the folder's `visit_Call`, so no SQL sinks are
+        # collected here: this pass answers one question about objects, and `self.folder`
+        # already collected the SQL. Collecting them twice would be pure duplicated work.
         f = node.func
         if isinstance(f, ast.Attribute) and f.attr in WRITE_METHODS:
             if self._is_writer_chain(f):
@@ -117,7 +252,14 @@ class _WriteFinder(ast.NodeVisitor):
         return self._chain_has_write(f.value)
 
     def _chain_has_write(self, node: ast.AST | None) -> bool:
-        """Look for a `.write` attribute anywhere in a receiver chain."""
+        """Look for a `.write` attribute -- or a name bound to one -- in a chain.
+
+        The second case is what makes `w = df.write; w.save(path)` reachable. `save`
+        and `jdbc` are common method names in the wider Python world, so they are only
+        trusted when the receiver provably came from a `.write`; an alias is provable
+        only when the binder says so, and an unresolvable name is no more of a writer
+        than an unrecognised expression is.
+        """
         depth = 0
         while node is not None and depth < 32:
             depth += 1
@@ -125,6 +267,8 @@ class _WriteFinder(ast.NodeVisitor):
                 if node.attr == "write":
                     return True
                 node = node.value
+            elif isinstance(node, ast.Name):
+                return self._is_writer_name(node)
             elif isinstance(node, ast.Call):
                 node = node.func.value if isinstance(node.func, ast.Attribute) else None
             elif isinstance(node, ast.Subscript):
@@ -216,6 +360,24 @@ class _WriteFinder(ast.NodeVisitor):
             depth += 1
             if isinstance(node, ast.Attribute) and node.attr == "write":
                 return _UNSET, True  # reached the writer: no .mode() on the chain
+            if isinstance(node, ast.Name) and self._is_writer_name(node):
+                # The chain bottomed out at a resolved alias, which is a different
+                # question from "reached a fresh `.write`" above.
+                #
+                # A DataFrameWriter is a mutable builder and every configuration call
+                # returns *self*, so `w.mode("overwrite")` on its own line mutates the
+                # object `w` still names, and the `w.save(path)` after it really is an
+                # overwrite. A fresh `df.write` cannot have been mutated -- it was just
+                # constructed -- which is why that branch is a known default and this
+                # one is not. Reporting the default here would be a false ALLOW on a
+                # destructive write, so the mode stays unknown and the verdict degrades
+                # to REVIEW.
+                #
+                # An *unresolved* name is deliberately not handled here: it keeps
+                # falling through to the `_UNSET` below, so a name we cannot resolve
+                # degrades to exactly the behaviour that existed before aliases were
+                # tracked, rather than to a new and different one.
+                return None, True
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 if node.func.attr == "mode":
                     if node.args:
