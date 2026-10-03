@@ -40,7 +40,7 @@ Each issue carries its reasoning inline, so the "why" survives without needing
 gaps, none accidental). **51 differential expectations re-verified against a live Spark
 3.5.1** — 40 SQL plus 11 DataFrame, the latter asserting row counts actually drop on
 overwrite. Wheel ships the parsers and runs with no JVM. A 20-statement file screens in
-**5.5 ms** warm.
+**~12 ms** warm for a 20-statement file; see `scripts/bench.py`.
 
 Detected today, and only this:
 
@@ -84,9 +84,9 @@ first.
 Shipped, with the oracle converted into assertions. `tests/differential/
 test_dataframe_writes.py` runs against a live Spark 3.5.1 and checks that an overwrite
 takes a target from 3 rows to 2, that an append takes it to 4, and that default mode
-raises `TABLE_OR_VIEW_ALREADY_EXISTS` and changes nothing. One limitation recorded as
-[T5b](threads.md#t5b--dataframe-writes-known-gap): an aliased writer (`w = df.write`) is
-missed for `.save`/`.jdbc`.
+raises `TABLE_OR_VIEW_ALREADY_EXISTS` and changes nothing. Aliased writers
+(`w = df.write`) are covered since `a4c40ab`; the branch-merge gap that remains is
+[F16](findings.md#f16--a-writer-bound-in-both-arms-of-an-if-loses-its-binding-savejdbc-report-allow).
 
 `df.write.mode(...).saveAsTable(...)`, `.save(...)`, `.insertInto(...)`, `.jdbc(...)`,
 `.write.partitionBy(...).save(...)`.

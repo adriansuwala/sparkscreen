@@ -70,10 +70,10 @@ SQLite DB and will silently disagree with a hand-edited JSONL.
 ## Current state (2026-10-03)
 
 - 0.8.0 — pre-1.0; see `sparkscreen.VERSION_NOTES` for why
-- 2,504 tests passing, 17 skipped, 8 xfailed (all documented gaps)
+- 2,593 tests passing, 17 skipped, 8 xfailed (all documented gaps)
 - 51 differential expectations against live Spark 3.5.1
 - 122 statement labels mapped to `Effect` flags across both pinned grammars
-- 5.5 ms for a 20-statement file, warm
+- ~12 ms for a 20-statement file, warm (`python scripts/bench.py`)
 - Mutation-tested with mutmut: `.venv/bin/mutmut run --max-children 4`
   (config in `[tool.mutmut]`; `process_isolation = "forkserver"` is required — see F15)
 
@@ -148,4 +148,4 @@ find yourself deleting or weakening one, stop.
 
 Screening Spark SQL and Spark DataFrame writes. **Not** general Python
 (`os.system`, `shutil.rmtree`, `dbutils` are out of scope *by decision* — see
-`sparkscreen-znf`). Not Rust; 5.5 ms against a multi-second job is not a bottleneck.
+`sparkscreen-znf`). Not Rust; 12 ms against a multi-second job is not a bottleneck.

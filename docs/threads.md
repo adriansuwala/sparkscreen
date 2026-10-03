@@ -133,15 +133,43 @@ way.
 
 ---
 
-## T5b — DataFrame writes: known gap
+## T5b — DataFrame writes through an aliased writer — DONE
 
-Shipped in 22ed358. One deliberate limitation: an aliased writer defeats the `save` and
-`jdbc` half. `w = df.write; w.save("s3://x")` is not detected, because the constant folder
-tracks string values and does not model object bindings. `saveAsTable` and `insertInto` are
-unaffected — they match on method name alone, so `w.saveAsTable(...)` is caught.
+Shipped in 22ed358, aliased writers in `a4c40ab`. `w = df.write; w.save("s3://x")` is now
+detected.
 
-Recorded rather than guessed at. Fixing it means tracking that a name was bound to a
-`.write` expression, which is a different kind of analysis from the one the folder does.
+The interesting part was not the detection but how it was made sound. Resolving a name to a
+*writer object* is a different kind of analysis from folding string values, and the obvious
+implementation restates the list of constructs that invalidate a binding — loop targets,
+`with`, parameters, augmented assignment, `global`/`nonlocal`, `del`, imports, `match`
+captures, comprehension variables. A second copy of that list is a second chance to be
+wrong in the fail-open direction.
+
+So `_WriteFinder` subclasses `StringFolder` and overrides `_value` alone. Every
+invalidation is inherited rather than restated. A probe covering ten rebinding constructs
+confirms all ten refuse to resolve a stale binding. Subclassing also made it one pass
+instead of two: a two-visitor draft ran a second traversal over the same tree, and sharing
+the traversal avoids that pass entirely. Measured cost of the whole change on the fixed
+`scripts/bench.py` corpus: 11.83 ms -> 12.18 ms, about 3%.
+
+The 3.5ms/6.6ms figures quoted in the original commit were measured on a different input
+and do not reproduce under `scripts/bench.py`. Kept here as the shape of the argument, not
+as numbers to cite.
+
+Two judgement calls, both deliberate:
+
+- An aliased writer's mode is reported **unknown**, where a fresh `df.write` reports a known
+  default. A `DataFrameWriter` is a mutable builder whose configuration calls return
+  `self`, so `w.mode("overwrite")` on its own line mutates the object `w` names and the
+  `w.save(path)` after it really is an overwrite — a chain walk cannot see a statement that
+  already ran. Reporting the default would be a false ALLOW on a destructive write. Costs an
+  ordinary aliased append a REVIEW; buys no false ALLOW.
+- An *unresolved* alias stays silent, including for `save`/`jdbc`. Turning every unresolved
+  writer into a REVIEW would bury ordinary agent code in findings.
+
+Remaining gap: a writer bound inside an `if` body loses its binding at the branch merge, so
+the two-arm form still reports ALLOW for `save`/`jdbc`. Recorded as
+[F16](findings.md#f16--a-writer-bound-in-both-arms-of-an-if-loses-its-binding-savejdbc-report-allow).
 
 ## T6 — Should Python-level calls be screened here?
 

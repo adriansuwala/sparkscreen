@@ -151,7 +151,8 @@ twice the grammar was the wrong oracle: case-insensitivity, and the fact that
 
 ## Performance
 
-~5.5 ms for a 20-statement file, warm. Screening is not a bottleneck in any pipeline where
+~12 ms for a 20-statement file, warm (measure it yourself with `scripts/bench.py`). Screening
+is not a bottleneck in any pipeline where
 a Spark job takes seconds — which is why this is Python, not Rust.
 
 ## Development
