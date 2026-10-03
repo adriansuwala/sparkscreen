@@ -90,10 +90,10 @@ print('    grammars  ', ', '.join(sorted(s.key for s in SPECS)))
   # this second check proves they are *usable*, which is the claim that actually matters
   # for a wheel with no JVM.
   PYTHONPATH=src "$FAST_VENV/bin/python" -c "
-from sparkscreen.grammar.parser import SparkParser
+from sparkscreen.grammar.parser import get_parser
 for key in ('spark-4.0', 'spark-3.5.1'):
-    parsed = SparkParser(key).parse('select 1')
-    assert parsed is not None, key
+    parsed = get_parser(key).parse('select 1')
+    assert parsed, key
 print('    parsers load and parse, no JVM needed')
 "
 fi
