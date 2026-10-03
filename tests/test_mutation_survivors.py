@@ -681,6 +681,21 @@ SURVIVORS_NOT_COVERED = {
     #    and the other arm starts from `node.args[0]`.
     "calls._recover_target__mutmut_4": "the `arg = None` initialiser is always "
                                         "overwritten or bypassed.",
+    # -- dead name: both pinned grammars emit `QuotedIdentifierContext` for a
+    #    backquoted identifier. `BackQuotedIdentifierContext` appears nowhere in either
+    #    parse tree, so mangling it changes nothing. Checked by walking every node of
+    #    `DROP TABLE `prod`.`users`` under both grammars: the identifier classes are
+    #    QuotedIdentifierContext, QuotedIdentifierAlternativeContext,
+    #    MultipartIdentifierContext, IdentifierContext,
+    #    IdentifierReferenceContext and ErrorCapturingIdentifierContext -- and no
+    #    BackQuotedIdentifierContext among them.
+    "treewalk.x__parts__mutmut_13/14/15":
+        "BackQuotedIdentifierContext is emitted by neither pinned grammar.",
+    # -- equivalent: `allow.query` is the LAST rule in default_policy(), so `break` on
+    #    it leaves the loop at the same place `continue` would. Verified by reading the
+    #    rule order, not assumed.
+    "policy.x_read_only_policy__mutmut_5":
+        "allow.query is last, so break and continue agree.",
     # -- equivalent: the `severity=` line is deleted outright rather than mangled, and
     #    `Finding.severity` already defaults to `Severity.MEDIUM`, so an omitted
     #    severity resolves to the same value either way.

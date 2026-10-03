@@ -652,6 +652,31 @@ class TestPolicyFromDictDefaults:
         rule = policy_from_dict({"rules": [{"id": "r.forgot"}]}).rules[0]
         assert rule.verdict is Verdict.DENY
 
+    def test_an_explicit_severity_and_reason_are_honoured(self):
+        """`x_policy_from_dict__mutmut_56/39`: `r.get("k", d)` -> `r.get(None, d)`.
+
+        The neighbouring tests only ever omit the key, and a None-key lookup returns
+        the default for an omitted key too -- so mangling the key name to `None` is
+        invisible until a policy file says what it *means*.
+
+        This is the fail-open direction: an operator who wrote `"severity": "critical"`
+        in a policy file would get MEDIUM instead, and one who wrote a reason would get
+        the generic `deny_rule`. The report would still load, still DENY, and quietly
+        misfile. The omitted-key tests cannot see it; only an explicit value can.
+        """
+        rule = policy_from_dict(
+            {"rules": [{"id": "r.explicit", "severity": "critical"}]}
+        ).rules[0]
+        assert rule.severity is Severity.CRITICAL, (
+            f"an explicit severity was ignored; read as {rule.severity}"
+        )
+        explicit_reason = policy_from_dict(
+            {"rules": [{"id": "r.explicit", "reason": "destructive_statement"}]}
+        ).rules[0]
+        assert explicit_reason.reason is Reason.DESTRUCTIVE_STATEMENT, (
+            f"an explicit reason was ignored; read as {explicit_reason.reason}"
+        )
+
     def test_an_omitted_severity_is_medium(self):
         """`x_policy_from_dict__mutmut_56/61`: the `"medium"` default mangled.
 
