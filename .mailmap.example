@@ -1,0 +1,21 @@
+# Copy to .mailmap.local and fill in. .mailmap.local is gitignored -- never commit it.
+#
+# Format is git-shortlog's mailmap:
+#
+#     proper-name <proper-email> commit-name <commit-email>
+#
+# BOTH halves of the old identity are required. Writing only
+#
+#     Name <[EMAIL]>
+#
+# looks equivalent and silently matches nothing: filter-repo matches a rule only when the
+# old email AND the old name both match (or the old name is left blank, which maps an
+# identity onto itself). Omitting the trailing pair is the easiest way to run a history
+# rewrite that reports success and changes nothing.
+#
+# The trailing pair below is the identity every commit so far was authored under. One line
+# covers all of them; add another if that stops being true.
+#
+#   Proper Name <[EMAIL]> sparkscreen dev <[EMAIL]>
+
+Proper Name <[EMAIL]> sparkscreen dev <[EMAIL]>

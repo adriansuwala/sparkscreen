@@ -28,3 +28,6 @@ src/sparkscreen/grammar/.cache/
 # mutmut's staged copy of the project
 mutants/
 .mutmut-cache/
+
+# local identity for scripts/rewrite-author.sh -- contains a real address, never commit
+.mailmap.local
