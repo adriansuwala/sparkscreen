@@ -64,12 +64,14 @@ SQLite DB and will silently disagree with a hand-edited JSONL.
 /opt/data/.local/bin/br list --status open
 ```
 
-## Current state (2026-10-02)
+## Current state (2026-10-03)
 
-- 2,479 tests passing, 16 skipped, 8 xfailed (all documented gaps)
+- 0.8.0 — pre-1.0; see `sparkscreen.VERSION_NOTES` for why
+- 2,501 tests passing, 16 skipped, 8 xfailed (all documented gaps)
 - 51 differential expectations against live Spark 3.5.1
 - 122 statement labels mapped to `Effect` flags across both pinned grammars
 - 5.5 ms for a 20-statement file, warm
+- Mutation-tested over the decision logic: `python scripts/mutate.py`
 
 ## Invariants you must not break
 

@@ -451,6 +451,44 @@ class TestSqlLengthLimit:
 
 
 class TestOtherLimits:
+    def test_sql_length_limit_boundary_is_exclusive(self, spec_key):
+        """Same boundary as `max_targets`, on the SQL-length cap in screen.py.
+
+        Second mutation survivor of the identical class: `len(sql) > max_sql_chars` could
+        be `>=` without any test noticing, because every test that hits the limit uses a
+        value far above it. Fixed alongside `max_targets` and `max_literals` because
+        finding the class once is not the same as fixing it once.
+        """
+        from sparkscreen.policy import Policy as _P
+
+        sql = "select 1"
+        exact = _P(name="e", rules=default_policy().rules,
+                   limits=Limits(max_sql_chars=len(sql)))
+        report = screen(sql_call(sql), exact, spec=spec_key)
+        assert Reason.CODE_LENGTH_EXCEEDED not in reasons(report), (
+            "SQL exactly at max_sql_chars must be allowed"
+        )
+        under = _P(name="u", rules=default_policy().rules,
+                   limits=Limits(max_sql_chars=len(sql) - 1))
+        assert Reason.CODE_LENGTH_EXCEEDED in reasons(screen(
+            sql_call(sql), under, spec=spec_key))
+
+    def test_statement_limit_boundary_is_exclusive(self, spec_key):
+        """`len(statements) > max_statements` -> `>=` was also a survivor."""
+        from sparkscreen.policy import Policy as _P
+
+        one = "BEGIN select 1; END"
+        exact = _P(name="s", rules=default_policy().rules,
+                   limits=Limits(max_statements=1))
+        report = screen(sql_call(one), exact, spec=spec_key)
+        if Reason.UNPARSEABLE_SQL in reasons(report):
+            pytest.skip("this grammar does not accept a multi-statement body")
+        assert Reason.RESOURCE_LIMIT not in reasons(report)
+        under = _P(name="s2", rules=default_policy().rules,
+                   limits=Limits(max_statements=0))
+        assert Reason.RESOURCE_LIMIT in reasons(screen(
+            sql_call(one), under, spec=spec_key))
+
     def test_limit_boundary_is_exclusive(self, spec_key):
         """A statement exactly AT a limit is under it; one over is not.
 
