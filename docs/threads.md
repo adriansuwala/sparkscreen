@@ -168,3 +168,57 @@ whether the abstraction is real.
 
 **Would change our mind** if users turn out to run this against code where local
 filesystem access genuinely matters.
+
+## T7 — should we execute the code instead of analysing it?
+
+**Status: open. Leaning "no for screening, yes as a differential oracle".** Raised
+2026-10-03.
+
+The proposal, worth stating precisely because it is more than "use a sandbox": install a
+shim `pyspark` module whose `sql()`, `table()`, and `write` methods do nothing but record
+their arguments, then `exec()` the snippet and read off the SQL strings and operations
+it *would* have issued. Python's own interpreter does the constant propagation,
+control flow, and closure resolution that we currently approximate.
+
+**The argument for it is strong on the merits.** Today, of the shapes a screener meets:
+
+| shape | verdict today |
+|---|---|
+| `spark.sql("DROP TABLE prod.t")` | DENY — recovered |
+| `t="prod.t"` + f-string | DENY — recovered |
+| `def d(t): spark.sql(f"DROP TABLE {t}")` then `d("prod.t")` | UNKNOWN |
+| `for t in ["a","b"]: spark.sql(f"DROP TABLE {t}")` | UNKNOWN |
+| `"".join(... for t in [...])` | UNKNOWN |
+| `M["drop"]` | UNKNOWN |
+| `input()` | UNKNOWN (correctly — unresolvable in principle) |
+
+Execution collapses rows 3–5 to DENY. That is the entire "interprocedural folding" work
+item, and it gets it for free and completely.
+
+**Why not as the primary path.** Three reasons, in order of weight.
+
+1. **It executes the code it is being asked to judge.** For a screener whose input is
+   agent-written PySpark, that inverts the trust model. Anything that does not go through
+   our shim — a bare `open()`, a subprocess, anything using a real `pyspark` already
+   imported by the host process — runs for real. A correct sandbox is a *large* project
+   (seccomp/gVisor, filesystem and network namespace isolation, resource limits, timeouts)
+   and a permanent source of CVEs. The static path has no such surface because it never
+   runs anything.
+2. **It cannot run without a cluster-shaped environment**, so the "works offline, in
+   pre-commit, no JVM" property is lost. That property is most of the value.
+3. **It answers "what did this literal snippet do", not "what does this function do".**
+   Agents compose across files and call sites we never see. Executing one file does not
+   resolve the program.
+
+**Where it *is* right: as a differential oracle.** A third path for the gaps above. In
+`tests/`, exec the snippet against a shim and assert the shim saw what the static folder
+claimed — a property test that the folder's UNKNOWN is genuinely a limitation rather than
+a bug, and that its recovered strings match an independent interpreter's. Same technique
+as the existing live-Spark differential, one layer in, and it cannot hurt production
+because it never runs there. This is the version worth building, if any.
+
+**Would change our mind** if the static path's UNKNOWN rate proved to be high enough in
+real agent output that operators stopped reading UNKNOWN — at which point the cost of a
+real sandbox might be worth paying. We have not measured that, and measuring it means
+collecting a corpus of real snippets. That corpus does not exist yet and is probably the
+highest-value next artifact of any kind.

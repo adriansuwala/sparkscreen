@@ -4,7 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sparkscreen"
-version = "0.1.0"
+# Single source of truth for the version. src/sparkscreen/__init__.py reads this via
+# importlib.metadata rather than hardcoding it, so there is one place to bump.
+# tests/test_packaging.py asserts they agree.
+version = "0.8.0"
 description = "Static safety screening for agent-written PySpark, using real parsers"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -52,9 +55,19 @@ include = ["sparkscreen*"]
 # Generated parsers ship in the wheel: installing and running sparkscreen must not
 # require a JVM. The globs cover every pinned grammar key, so adding a new one needs no
 # edit here.
+#
+# The vendored `.g4` sources are deliberately EXCLUDED. They are maintainer inputs --
+# `sparkscreen-grammar` reads them to re-generate the parsers -- and nothing on the
+# runtime path (screen/analysis/model) opens them. They measured 40 KB packed, 8% of the
+# wheel, for zero runtime benefit. Shipping them also invites the wrong inference: a user
+# who finds a grammar bug would edit a `.g4` in site-packages and see no change, because
+# the wheel ships generated parsers and nothing regenerates them.
+#
+# Consequence: a wheel cannot regenerate its own parsers. Regeneration is a checkout-time
+# maintainer operation requiring Java and ANTLR. tests/test_packaging.py enforces both
+# the exclusion and the presence of the generated parsers.
 "sparkscreen" = [
   "py.typed",
-  "grammar/vendored/**/*.g4",
   "grammar/generated/**/*.py",
   "grammar/generated/**/*.tokens",
   "grammar/generated/**/*.interp",

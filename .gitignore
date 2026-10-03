@@ -2,6 +2,7 @@
 dist/
 build/
 *.egg-info/
+src/*.egg-info/
 __pycache__/
 *.py[cod]
 
@@ -14,3 +15,16 @@ __pycache__/
 .beads/*.db-wal
 .beads/*.db-shm
 .beads/*.lock
+
+# grammar build artefacts: the ANTLR jar and generated scratch. The *generated parsers*
+# are deliberately NOT ignored -- they are committed so they ship in the wheel and no
+# runtime user needs a JVM. This entry covers only the jar and the intermediate tree.
+src/sparkscreen/grammar/.cache/
+*.jar
+
+# property-based testing corpus cache
+.hypothesis/
+
+# mutmut's staged copy of the project
+mutants/
+.mutmut-cache/

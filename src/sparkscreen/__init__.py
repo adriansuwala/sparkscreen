@@ -39,7 +39,29 @@ from .policy import (
 from .screen import screen
 from .grammar.spec import SPECS, get_spec, spec_for_spark_version
 
-__version__ = "0.1.0"
+try:  # installed: the packaging metadata is authoritative
+    from importlib.metadata import version as _pkg_version
+
+    __version__ = _pkg_version("sparkscreen")
+except Exception:  # pragma: no cover - source checkout without an install
+    __version__ = "0.8.0"
+
+#: Why this is not 1.0, stated once so it is not re-litigated.
+#:
+#: The screener is functionally complete and fail-closed, but 1.0 means "the interface
+#: will not break you", and two things can still break it:
+#:
+#:   * `Verdict` gained a member three commits ago. A downstream exhaustive `match` on
+#:     the verdict would have raised. That is a 0.x-style break, not a 1.0-style one.
+#:   * It has never been installed by anyone but its own author. There is one pair of
+#:     hands on it, so "works on my machine" and "works" are currently the same claim.
+#:
+#: Promoted to 1.0 once: the policy JSON shape has not changed across a release, and the
+#: differential suite has run against two real Spark versions on release day.
+VERSION_NOTES = (
+    "Pre-1.0. Verdict is not yet API-stable; exit codes (0/1/2) are stable. "
+    "Scope is Spark SQL and DataFrame writes; general Python screening is out of scope."
+)
 
 __all__ = [
     "screen",
@@ -62,4 +84,5 @@ __all__ = [
     "get_spec",
     "spec_for_spark_version",
     "__version__",
+    "VERSION_NOTES",
 ]
