@@ -25,7 +25,7 @@ import pytest
 from sparkscreen.analysis.treewalk import extract_namespaces
 from sparkscreen.grammar.parser import get_parser
 
-BOTH = ("spark-4.0", "spark-3.5.1")
+BOTH = ("spark-4.2", "spark-3.5.1")
 
 
 def _names(sql: str, key: str) -> list[str]:
@@ -115,7 +115,7 @@ def test_wrong_grammar_key_yields_nothing_for_plain_names(key: str) -> None:
     nothing, and this now tests that. Verified both directions before the change, so the
     distinction is not taken on trust.
     """
-    other = "spark-4.0" if key == "spark-3.5.1" else "spark-3.5.1"
+    other = "spark-4.2" if key == "spark-3.5.1" else "spark-3.5.1"
     for sql in ("drop table prod.users", "drop table prod.staging.tmp"):
         tree = get_parser(key).parse(sql).statements[0].tree
         refs = extract_namespaces(tree, grammar_key=other)

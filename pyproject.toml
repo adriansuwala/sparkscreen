@@ -40,9 +40,12 @@ dev = [
   "pytest-cov>=5",
 ]
 diff = [
-  # Differential testing needs a real engine. Pin it: the recorded expectations in
-  # tests/differential/corpus.py describe one specific Spark version's behaviour, and
-  # "the newest one" would silently invalidate them.
+  # Differential testing needs a real engine. Pin the default to the oldest line we
+  # support: the recorded expectations in tests/differential/corpus.py are per-engine,
+  # so "the newest" would silently compare the wrong grammar to the running engine.
+  # CI overrides this per matrix leg (see the `differential` job in ci.yml); locally,
+  # install an explicit version to test another line:
+  #   pip install "pyspark==4.2.0"
   "pyspark==3.5.1",
 ]
 

@@ -65,8 +65,8 @@ CORPUS: tuple[tuple[str, bool], ...] = (
 #: from CORPUS because a single boolean cannot describe them.
 VERSION_SPECIFIC: tuple[tuple[str, str, bool], ...] = (
     # (sql, grammar_key_that_accepts_it, observed)
-    ("SELECT 1 |> SELECT 2", "spark-4.0", True),
-    ("BEGIN DROP TABLE a; DROP VIEW b; END", "spark-4.0", True),
+    ("SELECT 1 |> SELECT 2", "spark-4.2", True),
+    ("BEGIN DROP TABLE a; DROP VIEW b; END", "spark-4.2", True),
 )
 
 #: And the ones the older grammar must reject.
@@ -74,6 +74,85 @@ VERSION_SPECIFIC_REJECTED: tuple[tuple[str, str], ...] = (
     ("SELECT 1 |> SELECT 2", "spark-3.5.1"),
     ("BEGIN DROP TABLE a; DROP VIEW b; END", "spark-3.5.1"),
     ("CALL sys.system_info()", "spark-3.5.1"),
+)
+
+
+# ---------------------------------------------------------------------------
+# Per-engine expectations, recorded against three live engines.
+# ---------------------------------------------------------------------------
+# CI matrixes the differential suite over real Spark 3.5.1, 4.1.3 and 4.2.0
+# (see the `differential` job in .github/workflows/ci.yml). A single boolean cannot
+# describe a statement whose behaviour changes across those, so `ENGINE_EXPECTATIONS`
+# says, per engine version, what that engine was *observed* to do.
+#
+# Every value here was observed by running the statement through the engine named in the
+# key -- live sessions, not the grammar, not memory. That distinction is the whole reason
+# this table exists and it is not decorative: three of these expectations contradict what
+# the grammar-only analysis predicted, in both directions. See the comments on the entries.
+#
+# Recorded with pyspark 3.5.1 / 4.1.3 / 4.2.0 on JDK 17, using `real_spark_verdict`
+# below, i.e. ParseException means rejected and anything else means accepted.
+ENGINE_EXPECTATIONS: dict[str, tuple[tuple[str, bool], ...]] = {
+    # --- accepted by 4.2.0 only: the F18 six ------------------------------------
+    # Each is the 4.2 form of its construct. `QUALIFY`, both `CHANGES` shapes and both
+    # `NEAREST` shapes are absent from the 4.1.3 grammar, and 4.1.3 rejects them at the
+    # parser with PARSE_SYNTAX_ERROR -- verified, not inferred.
+    "4.2.0": (
+        ("SELECT a FROM t QUALIFY ROW_NUMBER() OVER (ORDER BY a) = 1", True),
+        ("SELECT * FROM t CHANGES FROM VERSION 1", True),
+        ("SELECT * FROM t CHANGES FROM SYSTEM_VERSION 1 TO VERSION 9", True),
+        ("SELECT * FROM a JOIN b APPROX NEAREST BY DISTANCE a.p", True),
+        ("SELECT * FROM a JOIN b EXACT NEAREST BY SIMILARITY a.p", True),
+        # The 4.2 half of the `insertIntoReplaceWhere` split. 4.2's rule is
+        # `REPLACE (WHERE | ON) booleanExpression`; the `ON` spelling is 4.2-only and
+        # 4.1.3's error message for it is "missing 'WHERE'", which is the parse failure
+        # naming the rule that was replaced. Deriving this from the rule body rather than
+        # from memory is what makes it a test of the split.
+        ("INSERT INTO t REPLACE ON a > 1 VALUES (2)", True),
+    ),
+    "4.1.3": (
+        ("SELECT a FROM t QUALIFY ROW_NUMBER() OVER (ORDER BY a) = 1", False),
+        ("SELECT * FROM t CHANGES FROM VERSION 1", False),
+        ("SELECT * FROM t CHANGES FROM SYSTEM_VERSION 1 TO VERSION 9", False),
+        ("SELECT * FROM a JOIN b APPROX NEAREST BY DISTANCE a.p", False),
+        ("SELECT * FROM a JOIN b EXACT NEAREST BY SIMILARITY a.p", False),
+        ("INSERT INTO t REPLACE ON a > 1 VALUES (2)", False),
+    ),
+    "3.5.1": (
+        ("SELECT a FROM t QUALIFY ROW_NUMBER() OVER (ORDER BY a) = 1", False),
+        ("SELECT * FROM t CHANGES FROM VERSION 1", False),
+        ("SELECT * FROM t CHANGES FROM SYSTEM_VERSION 1 TO VERSION 9", False),
+        ("SELECT * FROM a JOIN b APPROX NEAREST BY DISTANCE a.p", False),
+        ("SELECT * FROM a JOIN b EXACT NEAREST BY SIMILARITY a.p", False),
+        ("INSERT INTO t REPLACE ON a > 1 VALUES (2)", False),
+    ),
+}
+
+
+#: Constructs present in *both* 4.x lines and rejected by 3.5.1 -- the 4.1-era features
+#: that survive into 4.2. Kept separate from `ENGINE_EXPECTATIONS` because the point is
+#: that 4.1.3 and 4.2.0 agree here: it is the "believed not to diverge" half of the
+#: matrix, and the reason 4.1 and 4.2 are separate jobs is to be first to know if that
+#: belief stops being true.
+BOTH_FOUR_X_ACCEPTED: tuple[str, ...] = (
+    "CREATE TABLE t (a INT PRIMARY KEY)",
+    "CREATE TABLE t (a INT, FOREIGN KEY (a) REFERENCES u (b))",
+    "CREATE STREAMING TABLE x PARTITIONED BY (a) AS SELECT * FROM t",
+)
+
+
+#: And two of the brief's claims that the live engines did NOT confirm, recorded so the
+#: matrix cannot quietly "fix" them later by editing the probe.
+#:
+#: `WINDOW` and `TABLESAMPLE` were listed as 4.1-era constructs that 3.5.1 rejects. Real
+#: 3.5.1 accepts both (they reach TABLE_OR_VIEW_NOT_FOUND, so they parsed). The shipped
+#: 3.5.1 grammar agrees with the engine and also accepts both. So they are not evidence
+#: of anything about the 4.x line, and asserting otherwise would have been a probe bug of
+#: exactly the kind F18 warns about: two independent sources agreeing that nothing is
+#: wrong while the note claims otherwise.
+BOTH_FOUR_X_ACCEPTED_WITHOUT_ENGINE_AGREEMENT: tuple[str, ...] = (
+    "SELECT sum(a) OVER w FROM t WINDOW w AS (ORDER BY a)",
+    "SELECT * FROM t TABLESAMPLE (10 PERCENT)",
 )
 
 

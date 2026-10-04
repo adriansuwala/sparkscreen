@@ -13,59 +13,48 @@
  *
  * This file is an adaptation of Presto's presto-parser/src/main/antlr4/com/facebook/presto/sql/parser/SqlBase.g4 grammar.
  */
+
 parser grammar SqlBaseParser;
+
 options { tokenVocab = SqlBaseLexer; }
-@header {
-def _port_dec_complex_type(parser):
-    """Spark reaches into the lexer's type-level counter for STRUCT<...> via NEQ."""
-    ts = getattr(parser, "_input", None)
-    src = getattr(ts, "tokenSource", None)
-    if src is not None and hasattr(src, "decComplexTypeLevelCounter"):
-        src.decComplexTypeLevelCounter()
 
-}
 @members {
-legacy_setops_precedence_enabled = False
-legacy_exponent_literal_as_decimal_enabled = False
-SQL_standard_keyword_behavior = False
-double_quoted_identifiers = False
-parameter_substitution_enabled = True
-legacy_identifier_clause_only = False
-single_character_pipe_operator_enabled = True
+  /**
+   * When false, INTERSECT is given the greater precedence over the other set
+   * operations (UNION, EXCEPT and MINUS) as per the SQL standard.
+   */
+  public boolean legacy_setops_precedence_enabled = false;
 
-_PIPE_START_TOKEN_NAMES = ('AGGREGATE', 'ANTI', 'AS', 'ASOF', 'BIN', 'CLUSTER', 'CROSS', 'DISTRIBUTE', 'DROP', 'EXCEPT', 'EXTEND', 'FULL', 'INNER', 'INTERSECT', 'JOIN', 'LATERAL', 'LEFT', 'LIMIT', 'NATURAL', 'OFFSET', 'ORDER', 'PIVOT', 'RIGHT', 'SELECT', 'SEMI', 'SET', 'SETMINUS', 'SORT', 'TABLESAMPLE', 'UNION', 'UNPIVOT', 'WHERE', 'WINDOW')
+  /**
+   * When false, a literal with an exponent would be converted into
+   * double type rather than decimal type.
+   */
+  public boolean legacy_exponent_literal_as_decimal_enabled = false;
 
-def isOperatorPipeStart(self):
-    if not self.single_character_pipe_operator_enabled:
-        return False
-    cls = type(self)
-    cached = cls.__dict__.get('_port_pipe_start_tokens')
-    if cached is None:
-        # resolved by name; tokens absent from older grammars are simply skipped
-        cached = frozenset(
-            getattr(cls, n) for n in cls._PIPE_START_TOKEN_NAMES
-            if hasattr(cls, n)
-        )
-        cls._port_pipe_start_tokens = cached
-    return self._input.LA(2) in cached
+  /**
+   * When true, the behavior of keywords follows ANSI SQL standard.
+   */
+  public boolean SQL_standard_keyword_behavior = false;
 
+  /**
+   * When true, double quoted literals are identifiers rather than STRINGs.
+   */
+  public boolean double_quoted_identifiers = false;
+
+  /**
+   * When false, parameter markers (? and :param) are only allowed in constant contexts.
+   * When true, parameter markers are allowed everywhere a literal is supported.
+   */
+  public boolean parameter_substitution_enabled = true;
+
+  /**
+   * When false (default), IDENTIFIER('literal') is resolved to an identifier at parse time (identifier-lite).
+   * When true, only the legacy IDENTIFIER(expression) function syntax is allowed.
+   * Controlled by spark.sql.legacy.identifierClause configuration.
+   */
+  public boolean legacy_identifier_clause_only = false;
 }
 
-/*
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- * This file is an adaptation of Presto's presto-parser/src/main/antlr4/com/facebook/presto/sql/parser/SqlBase.g4 grammar.
- */
 compoundOrSingleStatement
     : singleStatement
     | singleCompoundStatement
@@ -185,10 +174,6 @@ singleTableIdentifier
     : tableIdentifier EOF
     ;
 
-singleTemporalTableIdentifier
-    : temporalTableIdentifier EOF
-    ;
-
 singleMultipartIdentifier
     : multipartIdentifier EOF
     ;
@@ -205,10 +190,6 @@ singleTableSchema
     : colTypeList EOF
     ;
 
-singlePathElementList
-    : pathElement (COMMA pathElement)* EOF
-    ;
-
 singleRoutineParamList
     : colDefinitionList EOF
     ;
@@ -219,7 +200,7 @@ statement
     | ctes? dmlStatementNoWith                                         #dmlStatement
     | USE identifierReference                                          #use
     | USE namespace identifierReference                                #useNamespace
-    | SET CATALOG expression                                           #setCatalog
+    | SET CATALOG catalogIdentifierReference                           #setCatalog
     | CREATE namespace (IF errorCapturingNot EXISTS)? identifierReference
         (commentSpec |
          locationSpec |
@@ -240,8 +221,8 @@ statement
     | createTableHeader (LEFT_PAREN tableElementList RIGHT_PAREN)? tableProvider?
         createTableClauses
         (AS? query)?                                                   #createTable
-    | CREATE TABLE (IF errorCapturingNot EXISTS)? target=identifierReference
-        LIKE source=identifierReference
+    | CREATE TABLE (IF errorCapturingNot EXISTS)? target=tableIdentifier
+        LIKE source=tableIdentifier
         (tableProvider |
         rowFormat |
         createFileFormat |
@@ -315,14 +296,6 @@ statement
          (PARTITIONED ON identifierList) |
          (TBLPROPERTIES propertyList))*
         AS query                                                       #createView
-    | CREATE (OR REPLACE)?
-        VIEW (IF errorCapturingNot EXISTS)? identifierReference
-        identifierCommentList?
-        ((WITH METRICS) |
-         routineLanguage |
-         commentSpec |
-         (TBLPROPERTIES propertyList))*
-        AS codeLiteral                                                 #createMetricView
     | CREATE (OR REPLACE)? GLOBAL? TEMPORARY VIEW
         tableIdentifier (LEFT_PAREN colTypeList RIGHT_PAREN)? tableProvider
         (OPTIONS propertyList)?                                        #createTempViewUsing
@@ -342,33 +315,25 @@ statement
         (COMMA identifierReferences+=identifierReference)*
         dataType? variableDefaultExpression?                           #createVariable
     | DROP TEMPORARY variable (IF EXISTS)? identifierReference         #dropVariable
-    | DECLARE name=errorCapturingIdentifier (ASENSITIVE | INSENSITIVE)? CURSOR FOR query (FOR READ ONLY)?
-                                                                       #declareCursorStatement
-    | OPEN multipartIdentifier (USING (LEFT_PAREN params=namedExpressionSeq RIGHT_PAREN | params=namedExpressionSeq))?
-                                                                       #openCursorStatement
-    | FETCH ((NEXT? FROM) | FROM)? cursorName=multipartIdentifier INTO targets=multipartIdentifierList
-                                                                       #fetchCursorStatement
-    | CLOSE multipartIdentifier                                        #closeCursorStatement
     | EXPLAIN (LOGICAL | FORMATTED | EXTENDED | CODEGEN | COST)?
         (statement|setResetStatement)                                  #explain
     | SHOW TABLES ((FROM | IN) identifierReference)?
-        (LIKE? pattern=stringLit)? (AS JSON)?                            #showTables
+        (LIKE? pattern=stringLit)?                                        #showTables
     | SHOW TABLE EXTENDED ((FROM | IN) ns=identifierReference)?
-        LIKE pattern=stringLit partitionSpec? (AS JSON)?                  #showTableExtended
+        LIKE pattern=stringLit partitionSpec?                             #showTableExtended
     | SHOW TBLPROPERTIES table=identifierReference
         (LEFT_PAREN key=propertyKeyOrStringLit RIGHT_PAREN)?           #showTblProperties
     | SHOW COLUMNS (FROM | IN) table=identifierReference
         ((FROM | IN) ns=multipartIdentifier)?                          #showColumns
     | SHOW VIEWS ((FROM | IN) identifierReference)?
         (LIKE? pattern=stringLit)?                                        #showViews
-    | SHOW PARTITIONS identifierReference partitionSpec? (AS JSON)?    #showPartitions
+    | SHOW PARTITIONS identifierReference partitionSpec?               #showPartitions
     | SHOW functionScope=simpleIdentifier? FUNCTIONS ((FROM | IN) ns=identifierReference)?
         (LIKE? (legacy=multipartIdentifier | pattern=stringLit))?      #showFunctions
     | SHOW PROCEDURES ((FROM | IN) identifierReference)?               #showProcedures
     | SHOW CREATE TABLE identifierReference (AS SERDE)?                #showCreateTable
     | SHOW CURRENT namespace                                           #showCurrentNamespace
     | SHOW CATALOGS (LIKE? pattern=stringLit)?                            #showCatalogs
-    | SHOW COLLATIONS (LIKE? pattern=stringLit)?                          #showCollations
     | (DESC | DESCRIBE) FUNCTION EXTENDED? describeFuncName            #describeFunction
     | (DESC | DESCRIBE) PROCEDURE identifierReference                  #describeProcedure
     | (DESC | DESCRIBE) namespace EXTENDED?
@@ -379,9 +344,6 @@ statement
     | COMMENT ON namespace identifierReference IS
         comment                                                        #commentNamespace
     | COMMENT ON TABLE identifierReference IS comment                  #commentTable
-    | COMMENT ON TABLE identifierReference COLUMN
-        LEFT_PAREN columns=columnCommentList RIGHT_PAREN               #commentColumn
-    | COMMENT ON COLUMN columnComment                                  #commentColumn
     | REFRESH TABLE identifierReference                                #refreshTable
     | REFRESH FUNCTION identifierReference                             #refreshFunction
     | REFRESH (stringLit | .*?)                                        #refreshResource
@@ -407,9 +369,8 @@ statement
     | unsupportedHiveNativeCommands .*?                                #failNativeCommand
     | createPipelineDatasetHeader (LEFT_PAREN tableElementList? RIGHT_PAREN)? tableProvider?
         createTableClauses
-        (AS query | FLOW autoCdcBody)?                                 #createPipelineDataset
+        (AS query)?                                                    #createPipelineDataset
     | createPipelineFlowHeader insertInto query                        #createPipelineInsertIntoFlow
-    | createPipelineFlowHeader autoCdcCommand                          #createFlowAutoCdc
     ;
 
 materializedView
@@ -428,15 +389,10 @@ createPipelineDatasetHeader
     ;
 
 streamRelationPrimary
-    : STREAM multipartIdentifier streamChangesClause?
-      optionsClause? identifiedByClause?
-      watermarkClause? tableAlias                                      #streamTableName
+    : STREAM multipartIdentifier optionsClause? watermarkClause?
+      tableAlias                                                       #streamTableName
     | STREAM LEFT_PAREN multipartIdentifier RIGHT_PAREN
-      optionsClause? identifiedByClause?
-      watermarkClause? tableAlias                                      #streamTableName
-    | STREAM tableFunctionCallWithTrailingClauses                      #streamTableValuedFunction
-    | STREAM LEFT_PAREN tableFunctionCall RIGHT_PAREN
-      identifiedByClause? watermarkClause? tableAlias                  #streamTableValuedFunction
+      optionsClause? watermarkClause? tableAlias                       #streamTableName
     ;
 
 setResetStatement
@@ -444,7 +400,6 @@ setResetStatement
     | SET TIME ZONE interval                                           #setTimeZone
     | SET TIME ZONE timezone                                           #setTimeZone
     | SET TIME ZONE .*?                                                #setTimeZone
-    | SET PATH EQ pathElement (COMMA pathElement)*                     #setPath
     | SET variable assignmentList                                      #setVariable
     | SET variable LEFT_PAREN multipartIdentifierList RIGHT_PAREN EQ
         LEFT_PAREN query RIGHT_PAREN                                   #setVariable
@@ -454,15 +409,6 @@ setResetStatement
     | SET .*?                                                          #setConfiguration
     | RESET configKey                                                  #resetQuotedConfiguration
     | RESET .*?                                                        #resetConfiguration
-    ;
-
-pathElement
-    : DEFAULT_PATH
-    | SYSTEM_PATH
-    | PATH
-    | CURRENT_DATABASE
-    | CURRENT_SCHEMA
-    | multipartIdentifier
     ;
 
 executeImmediate
@@ -579,12 +525,9 @@ query
     ;
 
 insertInto
-    : INSERT (WITH SCHEMA EVOLUTION)? OVERWRITE TABLE? identifierReference optionsClause? (partitionSpec (IF errorCapturingNot EXISTS)?)?  ((BY NAME) | identifierList)? #insertOverwriteTable
-    | INSERT (WITH SCHEMA EVOLUTION)? INTO TABLE? identifierReference optionsClause? partitionSpec? (IF errorCapturingNot EXISTS)? ((BY NAME) | identifierList)?   #insertIntoTable
-    | INSERT (WITH SCHEMA EVOLUTION)? INTO TABLE? identifierReference tableAlias optionsClause? ((BY NAME) | identifierList)?
-        REPLACE (WHERE | ON) replaceCondition=booleanExpression        #insertIntoReplaceBooleanCond
-    | INSERT (WITH SCHEMA EVOLUTION)? INTO TABLE? identifierReference tableAlias optionsClause? (BY NAME)?
-        REPLACE USING identifierList                                   #insertIntoReplaceUsing
+    : INSERT OVERWRITE TABLE? identifierReference optionsClause? (partitionSpec (IF errorCapturingNot EXISTS)?)?  ((BY NAME) | identifierList)? #insertOverwriteTable
+    | INSERT INTO TABLE? identifierReference optionsClause? partitionSpec? (IF errorCapturingNot EXISTS)? ((BY NAME) | identifierList)?   #insertIntoTable
+    | INSERT INTO TABLE? identifierReference optionsClause? REPLACE whereClause                                             #insertIntoReplaceWhere
     | INSERT OVERWRITE LOCAL? DIRECTORY path=stringLit rowFormat? createFileFormat?                     #insertOverwriteHiveDir
     | INSERT OVERWRITE LOCAL? DIRECTORY (path=stringLit)? tableProvider (OPTIONS options=propertyList)? #insertOverwriteDir
     ;
@@ -729,61 +672,17 @@ resource
     ;
 
 dmlStatementNoWith
-    : insertInto (query | LEFT_PAREN query RIGHT_PAREN queryAlias=tableAlias)      #singleInsertQuery
+    : insertInto query                                                             #singleInsertQuery
     | fromClause multiInsertQueryBody+                                             #multiInsertQuery
-    | DELETE FROM identifierReference tableAlias optionsClause? whereClause?       #deleteFromTable
-    | UPDATE identifierReference tableAlias optionsClause? setClause whereClause?  #updateTable
+    | DELETE FROM identifierReference tableAlias whereClause?                      #deleteFromTable
+    | UPDATE identifierReference tableAlias setClause whereClause?                 #updateTable
     | MERGE (WITH SCHEMA EVOLUTION)? INTO target=identifierReference targetAlias=tableAlias
-        targetOptions=optionsClause?
-        USING (source=identifierReference sourceOptions=optionsClause? |
+        USING (source=identifierReference |
           LEFT_PAREN sourceQuery=query RIGHT_PAREN) sourceAlias=tableAlias
         ON mergeCondition=booleanExpression
         matchedClause*
         notMatchedClause*
         notMatchedBySourceClause*                                                  #mergeIntoTable
-    ;
-
-autoCdcCommand
-    : AUTO CDC INTO target=multipartIdentifier
-        autoCdcParameters
-    ;
-
-autoCdcBody
-    : AUTO CDC autoCdcParameters
-    ;
-
-autoCdcParameters
-    : FROM source=relationPrimary
-        KEYS LEFT_PAREN keys=identifierSeq RIGHT_PAREN
-        (autoCdcDeleteClause
-        | autoCdcSequenceByClause
-        | autoCdcColumnsClause
-        | autoCdcStoredAsClause
-        | autoCdcTrackHistoryClause)*
-    ;
-
-autoCdcDeleteClause
-    : APPLY AS DELETE WHEN deleteCondition=booleanExpression
-    ;
-
-autoCdcSequenceByClause
-    : SEQUENCE BY sequence=expression
-    ;
-
-autoCdcColumnsClause
-    : COLUMNS (
-        LEFT_PAREN columns=identifierSeq RIGHT_PAREN |
-        ASTERISK EXCEPT LEFT_PAREN exceptCols=identifierSeq RIGHT_PAREN)
-    ;
-
-autoCdcStoredAsClause
-    : STORED AS SCD TYPE scdType=INTEGER_VALUE
-    ;
-
-autoCdcTrackHistoryClause
-    : TRACK HISTORY ON (
-        LEFT_PAREN trackCols=identifierSeq RIGHT_PAREN |
-        ASTERISK EXCEPT LEFT_PAREN nonTrackCols=identifierSeq RIGHT_PAREN)
     ;
 
 identifierReference
@@ -813,14 +712,13 @@ multiInsertQueryBody
 
 queryTerm
     : queryPrimary                                                                       #queryTermDefault
-    | left=queryTerm {self.legacy_setops_precedence_enabled}?
+    | left=queryTerm {legacy_setops_precedence_enabled}?
         operator=(INTERSECT | UNION | EXCEPT | SETMINUS) setQuantifier? right=queryTerm  #setOperation
-    | left=queryTerm {not self.legacy_setops_precedence_enabled}?
+    | left=queryTerm {!legacy_setops_precedence_enabled}?
         operator=INTERSECT setQuantifier? right=queryTerm                                #setOperation
-    | left=queryTerm {not self.legacy_setops_precedence_enabled}?
+    | left=queryTerm {!legacy_setops_precedence_enabled}?
         operator=(UNION | EXCEPT | SETMINUS) setQuantifier? right=queryTerm              #setOperation
     | left=queryTerm OPERATOR_PIPE operatorPipeRightSide                                 #operatorPipeStatement
-    | left=queryTerm {self.isOperatorPipeStart()}? PIPE operatorPipeRightSide                 #operatorPipeStatement
     ;
 
 queryPrimary
@@ -849,7 +747,6 @@ fromStatementBody
       aggregationClause?
       havingClause?
       windowClause?
-      qualifyClause?
       queryOrganization
     ;
 
@@ -867,8 +764,7 @@ querySpecification
       whereClause?
       aggregationClause?
       havingClause?
-      windowClause?
-      qualifyClause?                                                        #regularQuerySpecification
+      windowClause?                                                         #regularQuerySpecification
     ;
 
 transformClause
@@ -939,10 +835,6 @@ havingClause
     : HAVING booleanExpression
     ;
 
-qualifyClause
-    : QUALIFY booleanExpression
-    ;
-
 hint
     : HENT_START hintStatements+=hintStatement (COMMA? hintStatements+=hintStatement)* HENT_END
     ;
@@ -959,20 +851,6 @@ fromClause
 temporalClause
     : FOR? (SYSTEM_VERSION | VERSION) AS OF version
     | FOR? (SYSTEM_TIME | TIMESTAMP) AS OF timestamp=valueExpression
-    ;
-
-changesClause
-    : CHANGES FROM (SYSTEM_VERSION | VERSION) startingVersion=version (INCLUSIVE | startExclusive=EXCLUSIVE)?
-        (TO (SYSTEM_VERSION | VERSION) endingVersion=version (INCLUSIVE | endExclusive=EXCLUSIVE)?)?
-    | CHANGES FROM (SYSTEM_TIME | TIMESTAMP) startingTimestamp=valueExpression (INCLUSIVE | startExclusive=EXCLUSIVE)?
-        (TO (SYSTEM_TIME | TIMESTAMP) endingTimestamp=valueExpression (INCLUSIVE | endExclusive=EXCLUSIVE)?)?
-    ;
-
-// Like changesClause but startingVersion/startingTimestamp is optional (streaming can start
-// without an explicit starting point) and there is no ending bound (streaming is open-ended).
-streamChangesClause
-    : CHANGES (FROM (SYSTEM_VERSION | VERSION) startingVersion=version (INCLUSIVE | startExclusive=EXCLUSIVE)?)?
-    | CHANGES (FROM (SYSTEM_TIME | TIMESTAMP) startingTimestamp=valueExpression (INCLUSIVE | startExclusive=EXCLUSIVE)?)?
     ;
 
 aggregationClause
@@ -1005,7 +883,7 @@ groupingSet
     ;
 
 pivotClause
-    : PIVOT LEFT_PAREN aggregates=namedExpressionSeq FOR pivotColumn IN LEFT_PAREN pivotValues+=pivotValue (COMMA pivotValues+=pivotValue)* RIGHT_PAREN RIGHT_PAREN (AS? errorCapturingIdentifier)?
+    : PIVOT LEFT_PAREN aggregates=namedExpressionSeq FOR pivotColumn IN LEFT_PAREN pivotValues+=pivotValue (COMMA pivotValues+=pivotValue)* RIGHT_PAREN RIGHT_PAREN
     ;
 
 pivotColumn
@@ -1065,20 +943,6 @@ unpivotAlias
     : AS? errorCapturingIdentifier
     ;
 
-binByClause
-    : BIN BY LEFT_PAREN
-        RANGE rangeStart=multipartIdentifier TO rangeEnd=multipartIdentifier
-        BIN WIDTH binWidth=expression
-        (ALIGN TO origin=expression)?
-        DISTRIBUTE UNIFORM LEFT_PAREN
-          distributeCol+=multipartIdentifier
-          (COMMA distributeCol+=multipartIdentifier)* RIGHT_PAREN
-        (BIN_START AS binStartAlias=errorCapturingIdentifier)?
-        (BIN_END AS binEndAlias=errorCapturingIdentifier)?
-        (BIN_DISTRIBUTE_RATIO AS binRatioAlias=errorCapturingIdentifier)?
-      RIGHT_PAREN (AS? tblAlias=errorCapturingIdentifier)?
-    ;
-
 lateralView
     : LATERAL VIEW (OUTER)? qualifiedName LEFT_PAREN (expression (COMMA expression)*)? RIGHT_PAREN tblName=identifier (AS? colName+=identifier (COMMA colName+=identifier)*)?
     ;
@@ -1100,28 +964,11 @@ relationExtension
     : joinRelation
     | pivotClause
     | unpivotClause
-    | binByClause
     ;
 
 joinRelation
-    : (joinType) JOIN LATERAL? right=relationPrimary joinPostfix?
+    : (joinType) JOIN LATERAL? right=relationPrimary joinCriteria?
     | NATURAL joinType JOIN LATERAL? right=relationPrimary
-    | asofJoinType ASOF JOIN right=relationPrimary asofJoinCriteria
-    ;
-
-asofJoinType
-    : INNER?
-    | LEFT OUTER?
-    ;
-
-joinPostfix
-    : joinCriteria
-    | nearestByClause
-    ;
-
-asofJoinCriteria
-    : MATCH_CONDITION LEFT_PAREN matchExpr=booleanExpression RIGHT_PAREN
-      ( ON onExpr=booleanExpression | USING identifierList )?
     ;
 
 joinType
@@ -1139,14 +986,8 @@ joinCriteria
     | USING identifierList
     ;
 
-nearestByClause
-    : (APPROX | EXACT) NEAREST num=INTEGER_VALUE? BY (DISTANCE | SIMILARITY) expression
-    ;
-
 sample
-    : TABLESAMPLE (sampleType=(SYSTEM | BERNOULLI))?
-      LEFT_PAREN sampleMethod? RIGHT_PAREN
-      (REPEATABLE LEFT_PAREN seed=integerValue RIGHT_PAREN)?
+    : TABLESAMPLE LEFT_PAREN sampleMethod? RIGHT_PAREN (REPEATABLE LEFT_PAREN seed=integerValue RIGHT_PAREN)?
     ;
 
 sampleMethod
@@ -1183,34 +1024,18 @@ identifierComment
 
 relationPrimary
     : streamRelationPrimary                                 #streamRelation
-    | identifierReference changesClause
-      optionsClause? tableAlias                             #changelogTableName
-    | temporalTableIdentifierReference temporalClause?
+    | identifierReference temporalClause?
       optionsClause? sample? watermarkClause? tableAlias    #tableName
     | LEFT_PAREN query RIGHT_PAREN sample? watermarkClause?
       tableAlias                                            #aliasedQuery
     | LEFT_PAREN relation RIGHT_PAREN sample?
        watermarkClause? tableAlias                          #aliasedRelation
     | inlineTable                                           #inlineTableDefault2
-    | unnest                                                #unnestTable
-    | tableFunctionCallWithTrailingClauses                  #tableValuedFunction
-    ;
-
-// ANSI SQL UNNEST of one or more arrays in the FROM clause, with an optional
-// trailing ordinality column (WITH ORDINALITY). Multiple arrays are expanded in
-// parallel, padded with NULLs to the length of the longest array.
-unnest
-    : UNNEST LEFT_PAREN expression (COMMA expression)* RIGHT_PAREN
-      (WITH ORDINALITY)? tableAlias
+    | functionTable                                         #tableValuedFunction
     ;
 
 optionsClause
     : WITH options=propertyList
-    ;
-
-// Clause for naming streaming sources with IDENTIFIED BY
-identifiedByClause
-    : IDENTIFIED BY sourceName=errorCapturingIdentifier
     ;
 
 // Unlike all other types of expression for relation, we do not support watermarkClause for
@@ -1251,19 +1076,13 @@ functionTableArgument
     | functionArgument
     ;
 
-// A table function call including opening and closing parentheses.
-tableFunctionCall
+// This is only used in relationPrimary where having watermarkClause makes sense. If this becomes
+// referred by other clause, please check wheter watermarkClause makes sense to the clause.
+// If not, consider separate this rule.
+functionTable
     : funcName=functionName LEFT_PAREN
       (functionTableArgument (COMMA functionTableArgument)*)?
-      RIGHT_PAREN
-    ;
-
-// A table function call with optional trailing clauses for streaming and aliasing.
-// The identifiedByClause is optional and only valid for streaming TVFs. For non-streaming TVFs,
-// the AST builder will reject it with an error. The clause must come before watermarkClause
-// and tableAlias to avoid ambiguity (since IDENTIFIED is a nonReserved keyword).
-tableFunctionCallWithTrailingClauses
-    : tableFunctionCall identifiedByClause? watermarkClause? tableAlias
+      RIGHT_PAREN watermarkClause? tableAlias
     ;
 
 tableAlias
@@ -1298,18 +1117,6 @@ multipartIdentifierProperty
 
 tableIdentifier
     : (db=errorCapturingIdentifier DOT)? table=errorCapturingIdentifier
-    ;
-
-temporalTableIdentifier
-    : id=multipartIdentifier AT_SIGN timestamp=INTEGER_VALUE
-    | id=multipartIdentifier AT_VERSION version
-    | id=multipartIdentifier
-    ;
-
-temporalTableIdentifierReference
-    : identifierReference AT_SIGN timestamp=INTEGER_VALUE
-    | identifierReference AT_VERSION version
-    | identifierReference
     ;
 
 functionIdentifier
@@ -1371,7 +1178,7 @@ booleanExpression
 
 predicate
     : errorCapturingNot? kind=BETWEEN lower=valueExpression AND upper=valueExpression
-    | errorCapturingNot? kind=IN (LEFT_PAREN RIGHT_PAREN | LEFT_PAREN expression (COMMA expression)* RIGHT_PAREN)
+    | errorCapturingNot? kind=IN LEFT_PAREN expression (COMMA expression)* RIGHT_PAREN
     | errorCapturingNot? kind=IN LEFT_PAREN query RIGHT_PAREN
     | errorCapturingNot? kind=RLIKE pattern=valueExpression
     | errorCapturingNot? kind=(LIKE | ILIKE) quantifier=(ANY | SOME | ALL) (LEFT_PAREN RIGHT_PAREN | LEFT_PAREN expression (COMMA expression)* RIGHT_PAREN)
@@ -1394,7 +1201,7 @@ valueExpression
     | left=valueExpression shiftOperator right=valueExpression                               #shiftExpression
     | left=valueExpression operator=AMPERSAND right=valueExpression                          #arithmeticBinary
     | left=valueExpression operator=HAT right=valueExpression                                #arithmeticBinary
-    | left=valueExpression {not self.isOperatorPipeStart()}? operator=PIPE right=valueExpression     #arithmeticBinary
+    | left=valueExpression operator=PIPE right=valueExpression                               #arithmeticBinary
     | left=valueExpression comparisonOperator right=valueExpression                          #comparison
     ;
 
@@ -1411,7 +1218,7 @@ datetimeUnit
     ;
 
 primaryExpression
-    : name=(CURRENT_DATE | CURRENT_TIMESTAMP | CURRENT_USER | USER | SESSION_USER | CURRENT_TIME | CURRENT_PATH | LOCALTIME)             #currentLike
+    : name=(CURRENT_DATE | CURRENT_TIMESTAMP | CURRENT_USER | USER | SESSION_USER | CURRENT_TIME)             #currentLike
     | name=(TIMESTAMPADD | DATEADD | DATE_ADD) LEFT_PAREN (unit=datetimeUnit | invalidUnit=stringLit) COMMA unitsAmount=valueExpression COMMA timestamp=valueExpression RIGHT_PAREN             #timestampadd
     | name=(TIMESTAMPDIFF | DATEDIFF | DATE_DIFF | TIMEDIFF) LEFT_PAREN (unit=datetimeUnit | invalidUnit=stringLit) COMMA startTimestamp=valueExpression COMMA endTimestamp=valueExpression RIGHT_PAREN    #timestampdiff
     | CASE whenClause+ (ELSE elseExpression=expression)? END                                   #searchedCase
@@ -1564,18 +1371,15 @@ collateClause
 
 nonTrivialPrimitiveType
     : STRING collateClause?
-    | (CHARACTER | CHAR) (LEFT_PAREN length=integerValue RIGHT_PAREN)? collateClause?
-    | VARCHAR (LEFT_PAREN length=integerValue RIGHT_PAREN)? collateClause?
+    | (CHARACTER | CHAR) (LEFT_PAREN length=integerValue RIGHT_PAREN)?
+    | VARCHAR (LEFT_PAREN length=integerValue RIGHT_PAREN)?
     | (DECIMAL | DEC | NUMERIC)
         (LEFT_PAREN precision=integerValue (COMMA scale=integerValue)? RIGHT_PAREN)?
     | INTERVAL
         (fromYearMonth=(YEAR | MONTH) (TO to=MONTH)? |
          fromDayTime=(DAY | HOUR | MINUTE | SECOND) (TO to=(HOUR | MINUTE | SECOND))?)?
-    | TIMESTAMP (LEFT_PAREN precision=integerValue RIGHT_PAREN)?
-        (withLocalTimeZone | withoutTimeZone)?
-    | TIMESTAMP_LTZ (LEFT_PAREN precision=integerValue RIGHT_PAREN)?
-    | TIMESTAMP_NTZ (LEFT_PAREN precision=integerValue RIGHT_PAREN)?
-    | TIME (LEFT_PAREN precision=integerValue RIGHT_PAREN)? (withoutTimeZone)?
+    | TIMESTAMP (WITHOUT TIME ZONE)?
+    | TIME (LEFT_PAREN precision=integerValue RIGHT_PAREN)? (WITHOUT TIME ZONE)?
     | GEOGRAPHY LEFT_PAREN (srid=integerValue | any=ANY) RIGHT_PAREN
     | GEOMETRY LEFT_PAREN (srid=integerValue | any=ANY) RIGHT_PAREN
     ;
@@ -1589,17 +1393,10 @@ trivialPrimitiveType
     | FLOAT | REAL
     | DOUBLE
     | DATE
+    | TIMESTAMP_LTZ | TIMESTAMP_NTZ
     | BINARY
     | VOID
     | VARIANT
-    ;
-
-withLocalTimeZone
-    : WITH LOCAL TIME ZONE
-    ;
-
-withoutTimeZone
-    : WITHOUT TIME ZONE
     ;
 
 primitiveType
@@ -1611,7 +1408,7 @@ primitiveType
 dataType
     : complex=ARRAY (LT dataType GT)?                           #complexDataType
     | complex=MAP (LT dataType COMMA dataType GT)?              #complexDataType
-    | complex=STRUCT ((LT complexColTypeList? GT) | NEQ {_port_dec_complex_type(self)})?       #complexDataType
+    | complex=STRUCT ((LT complexColTypeList? GT) | NEQ)?       #complexDataType
     | primitiveType                                             #primitiveDataType
     ;
 
@@ -1698,17 +1495,6 @@ complexColType
     : errorCapturingIdentifier COLON? dataType (errorCapturingNot NULL)? commentSpec?
     ;
 
-// The code literal is defined as a dollar quoted string.
-// A dollar quoted string consists of
-// - a begin tag which contains a dollar sign, an optional tag, and another dollar sign,
-// - a string literal that is made up of arbitrary sequence of characters, and
-// - an end tag which has to be exact the same as the begin tag.
-// As the string literal can contain dollar signs, we add + to DOLLAR_QUOTED_STRING_BODY to avoid
-// the parser eagarly matching END_DOLLAR_QUOTED_STRING when seeing a dollar sign.
-codeLiteral
-    : BEGIN_DOLLAR_QUOTED_STRING DOLLAR_QUOTED_STRING_BODY+ END_DOLLAR_QUOTED_STRING
-    ;
-
 routineCharacteristics
     : (routineLanguage
     | specificName
@@ -1716,7 +1502,6 @@ routineCharacteristics
     | sqlDataAccess
     | nullCall
     | commentSpec
-    | collationSpec
     | rightsClause)*
     ;
 
@@ -1818,7 +1603,7 @@ errorCapturingIdentifierExtra
 
 identifier
     : strictIdentifier
-    | {not self.SQL_standard_keyword_behavior}? strictNonReserved
+    | {!SQL_standard_keyword_behavior}? strictNonReserved
     ;
 
 // simpleIdentifier: like identifier but without IDENTIFIER('literal') support
@@ -1828,28 +1613,28 @@ identifier
 //   - Other keyword-like or string-like uses
 simpleIdentifier
     : simpleStrictIdentifier
-    | {not self.SQL_standard_keyword_behavior}? strictNonReserved
+    | {!SQL_standard_keyword_behavior}? strictNonReserved
     ;
 
 strictIdentifier
     : IDENTIFIER              #unquotedIdentifier
     | quotedIdentifier        #quotedIdentifierAlternative
-    | {not self.legacy_identifier_clause_only}? IDENTIFIER_KW LEFT_PAREN stringLit RIGHT_PAREN  #identifierLiteral
-    | {self.SQL_standard_keyword_behavior}? ansiNonReserved #unquotedIdentifier
-    | {not self.SQL_standard_keyword_behavior}? nonReserved    #unquotedIdentifier
+    | {!legacy_identifier_clause_only}? IDENTIFIER_KW LEFT_PAREN stringLit RIGHT_PAREN  #identifierLiteral
+    | {SQL_standard_keyword_behavior}? ansiNonReserved #unquotedIdentifier
+    | {!SQL_standard_keyword_behavior}? nonReserved    #unquotedIdentifier
     ;
 
 // simpleStrictIdentifier: like strictIdentifier but without IDENTIFIER('literal') support
 simpleStrictIdentifier
     : IDENTIFIER              #simpleUnquotedIdentifier
     | quotedIdentifier        #simpleQuotedIdentifierAlternative
-    | {self.SQL_standard_keyword_behavior}? ansiNonReserved #simpleUnquotedIdentifier
-    | {not self.SQL_standard_keyword_behavior}? nonReserved    #simpleUnquotedIdentifier
+    | {SQL_standard_keyword_behavior}? ansiNonReserved #simpleUnquotedIdentifier
+    | {!SQL_standard_keyword_behavior}? nonReserved    #simpleUnquotedIdentifier
     ;
 
 quotedIdentifier
     : BACKQUOTED_IDENTIFIER
-    | {self.double_quoted_identifiers}? DOUBLEQUOTED_STRING
+    | {double_quoted_identifiers}? DOUBLEQUOTED_STRING
     ;
 
 backQuotedIdentifier
@@ -1857,9 +1642,9 @@ backQuotedIdentifier
     ;
 
 number
-    : {not self.legacy_exponent_literal_as_decimal_enabled}? MINUS? EXPONENT_VALUE #exponentLiteral
-    | {not self.legacy_exponent_literal_as_decimal_enabled}? MINUS? DECIMAL_VALUE  #decimalLiteral
-    | {self.legacy_exponent_literal_as_decimal_enabled}? MINUS? (EXPONENT_VALUE | DECIMAL_VALUE) #legacyDecimalLiteral
+    : {!legacy_exponent_literal_as_decimal_enabled}? MINUS? EXPONENT_VALUE #exponentLiteral
+    | {!legacy_exponent_literal_as_decimal_enabled}? MINUS? DECIMAL_VALUE  #decimalLiteral
+    | {legacy_exponent_literal_as_decimal_enabled}? MINUS? (EXPONENT_VALUE | DECIMAL_VALUE) #legacyDecimalLiteral
     | MINUS? INTEGER_VALUE            #integerLiteral
     | MINUS? BIGINT_LITERAL           #bigIntLiteral
     | MINUS? SMALLINT_LITERAL         #smallIntLiteral
@@ -1947,19 +1732,11 @@ alterColumnAction
     | dropDefault=DROP DEFAULT
     ;
 
-columnCommentList
-    : columnComment (COMMA columnComment)*
-    ;
-
-columnComment
-    : column=multipartIdentifier IS comment
-    ;
-
 // Matches exactly one string literal without coalescing or parameter markers.
 // Used in type constructors where coalescing is not allowed.
 singleStringLitWithoutMarker
     : STRING_LITERAL                                                                           #singleStringLiteralValue
-    | {not self.double_quoted_identifiers}? DOUBLEQUOTED_STRING                                        #singleDoubleQuotedStringLiteralValue
+    | {!double_quoted_identifiers}? DOUBLEQUOTED_STRING                                        #singleDoubleQuotedStringLiteralValue
     ;
 
 // Matches one string literal or parameter marker (no coalescing).
@@ -1969,8 +1746,8 @@ singleStringLit
     ;
 
 parameterMarker
-    : {self.parameter_substitution_enabled}? namedParameterMarker                                   #namedParameterMarkerRule
-    | {self.parameter_substitution_enabled}? QUESTION                                               #positionalParameterMarkerRule
+    : {parameter_substitution_enabled}? namedParameterMarker                                   #namedParameterMarkerRule
+    | {parameter_substitution_enabled}? QUESTION                                               #positionalParameterMarkerRule
     ;
 
 stringLit
@@ -1988,10 +1765,10 @@ version
     ;
 
 operatorPipeRightSide
-    : selectClause aggregationClause? windowClause?
+    : selectClause windowClause?
     | EXTEND extendList=namedExpressionSeq
     | SET operatorPipeSetAssignmentSeq
-    | DROP multipartIdentifierList
+    | DROP identifierSeq
     | AS errorCapturingIdentifier
     // Note that the WINDOW clause is not allowed in the WHERE pipe operator, but we add it here in
     // the grammar simply for purposes of catching this invalid syntax and throwing a specific
@@ -2002,7 +1779,6 @@ operatorPipeRightSide
     // messages in the event that both are present (this is not allowed).
     | pivotClause unpivotClause?
     | unpivotClause pivotClause?
-    | binByClause
     | sample
     | joinRelation
     | operator=(UNION | EXCEPT | SETMINUS | INTERSECT) setQuantifier? right=queryPrimary
@@ -2034,30 +1810,19 @@ ansiNonReserved
     : ADD
     | AFTER
     | AGGREGATE
-    | ALIGN
     | ALTER
     | ALWAYS
     | ANALYZE
     | ANTI
     | ANY_VALUE
-    | APPLY
-    | APPROX
     | ARCHIVE
     | ARRAY
     | ASC
-    | ASENSITIVE
-    | ASOF
     | AT
     | ATOMIC
-    | AUTO
     | BEGIN
-    | BERNOULLI
     | BETWEEN
     | BIGINT
-    | BIN
-    | BIN_DISTRIBUTE_RATIO
-    | BIN_END
-    | BIN_START
     | BINARY
     | BINARY_HEX
     | BINDING
@@ -2071,13 +1836,10 @@ ansiNonReserved
     | CASCADE
     | CATALOG
     | CATALOGS
-    | CDC
     | CHANGE
-    | CHANGES
     | CHAR
     | CHARACTER
     | CLEAR
-    | CLOSE
     | CLUSTER
     | CLUSTERED
     | CODEGEN
@@ -2094,10 +1856,8 @@ ansiNonReserved
     | CONTAINS
     | CONTINUE
     | COST
-    | CURSOR
     | CUBE
     | CURRENT
-    | CURRENT_DATABASE
     | DATA
     | DATABASE
     | DATABASES
@@ -2114,7 +1874,6 @@ ansiNonReserved
     | DECIMAL
     | DECLARE
     | DEFAULT
-    | DEFAULT_PATH
     | DEFINED
     | DEFINER
     | DELAY
@@ -2126,7 +1885,6 @@ ansiNonReserved
     | DFS
     | DIRECTORIES
     | DIRECTORY
-    | DISTANCE
     | DISTRIBUTE
     | DIV
     | DO
@@ -2136,10 +1894,8 @@ ansiNonReserved
     | ENFORCED
     | ESCAPED
     | EVOLUTION
-    | EXACT
     | EXCHANGE
     | EXCLUDE
-    | EXCLUSIVE
     | EXISTS
     | EXIT
     | EXPLAIN
@@ -2165,18 +1921,15 @@ ansiNonReserved
     | GLOBAL
     | GROUPING
     | HANDLER
-    | HISTORY
     | HOUR
     | HOURS
     | IDENTIFIER_KW
-    | IDENTIFIED
     | IDENTITY
     | IF
     | IGNORE
     | IMMEDIATE
     | IMPORT
     | INCLUDE
-    | INCLUSIVE
     | INCREMENT
     | INDEX
     | INDEXES
@@ -2184,7 +1937,6 @@ ansiNonReserved
     | INPUT
     | INPUTFORMAT
     | INSERT
-    | INSENSITIVE
     | INT
     | INTEGER
     | INTERVAL
@@ -2215,12 +1967,9 @@ ansiNonReserved
     | MACRO
     | MAP
     | MATCHED
-    | MATCH_CONDITION
     | MATERIALIZED
     | MAX
-    | MEASURE
     | MERGE
-    | METRICS
     | MICROSECOND
     | MICROSECONDS
     | MILLISECOND
@@ -2236,18 +1985,14 @@ ansiNonReserved
     | NAMESPACES
     | NANOSECOND
     | NANOSECONDS
-    | NEAREST
-    | NEXT
     | NO
     | NONE
     | NORELY
     | NULLS
     | NUMERIC
     | OF
-    | OPEN
     | OPTION
     | OPTIONS
-    | ORDINALITY
     | OUT
     | OUTPUTFORMAT
     | OVER
@@ -2256,7 +2001,6 @@ ansiNonReserved
     | PARTITION
     | PARTITIONED
     | PARTITIONS
-    | PATH
     | PERCENTLIT
     | PIVOT
     | PLACING
@@ -2267,11 +2011,9 @@ ansiNonReserved
     | PROCEDURES
     | PROPERTIES
     | PURGE
-    | QUALIFY
     | QUARTER
     | QUERY
     | RANGE
-    | READ
     | READS
     | REAL
     | RECORDREADER
@@ -2299,7 +2041,6 @@ ansiNonReserved
     | ROLLUP
     | ROW
     | ROWS
-    | SCD
     | SCHEMA
     | SCHEMAS
     | SECOND
@@ -2307,7 +2048,6 @@ ansiNonReserved
     | SECURITY
     | SEMI
     | SEPARATED
-    | SEQUENCE
     | SERDE
     | SERDEPROPERTIES
     | SET
@@ -2315,7 +2055,6 @@ ansiNonReserved
     | SETS
     | SHORT
     | SHOW
-    | SIMILARITY
     | SINGLE
     | SKEWED
     | SMALLINT
@@ -2336,8 +2075,6 @@ ansiNonReserved
     | SUBSTR
     | SUBSTRING
     | SYNC
-    | SYSTEM
-    | SYSTEM_PATH
     | SYSTEM_TIME
     | SYSTEM_VERSION
     | TABLES
@@ -2354,7 +2091,6 @@ ansiNonReserved
     | TIMESTAMPDIFF
     | TINYINT
     | TOUCH
-    | TRACK
     | TRANSACTION
     | TRANSACTIONS
     | TRANSFORM
@@ -2366,9 +2102,7 @@ ansiNonReserved
     | UNARCHIVE
     | UNBOUNDED
     | UNCACHE
-    | UNIFORM
     | UNLOCK
-    | UNNEST
     | UNPIVOT
     | UNSET
     | UNTIL
@@ -2388,7 +2122,6 @@ ansiNonReserved
     | WEEKS
     | WHILE
     | WATERMARK
-    | WIDTH
     | WINDOW
     | WITHOUT
     | YEAR
@@ -2430,7 +2163,6 @@ nonReserved
     : ADD
     | AFTER
     | AGGREGATE
-    | ALIGN
     | ALL
     | ALTER
     | ALWAYS
@@ -2438,26 +2170,16 @@ nonReserved
     | AND
     | ANY
     | ANY_VALUE
-    | APPLY
-    | APPROX
     | ARCHIVE
     | ARRAY
     | AS
     | ASC
-    | ASENSITIVE
-    | ASOF
     | AT
     | ATOMIC
     | AUTHORIZATION
-    | AUTO
     | BEGIN
-    | BERNOULLI
     | BETWEEN
     | BIGINT
-    | BIN
-    | BIN_DISTRIBUTE_RATIO
-    | BIN_END
-    | BIN_START
     | BINARY
     | BINARY_HEX
     | BINDING
@@ -2475,20 +2197,16 @@ nonReserved
     | CAST
     | CATALOG
     | CATALOGS
-    | CDC
     | CHANGE
-    | CHANGES
     | CHAR
     | CHARACTER
     | CHECK
     | CLEAR
-    | CLOSE
     | CLUSTER
     | CLUSTERED
     | CODEGEN
     | COLLATE
     | COLLATION
-    | COLLATIONS
     | COLLECTION
     | COLUMN
     | COLUMNS
@@ -2507,11 +2225,7 @@ nonReserved
     | CREATE
     | CUBE
     | CURRENT
-    | CURSOR
-    | CURRENT_DATABASE
     | CURRENT_DATE
-    | CURRENT_PATH
-    | CURRENT_SCHEMA
     | CURRENT_TIME
     | CURRENT_TIMESTAMP
     | CURRENT_USER
@@ -2531,7 +2245,6 @@ nonReserved
     | DECIMAL
     | DECLARE
     | DEFAULT
-    | DEFAULT_PATH
     | DEFINED
     | DEFINER
     | DELAY
@@ -2543,7 +2256,6 @@ nonReserved
     | DFS
     | DIRECTORIES
     | DIRECTORY
-    | DISTANCE
     | DISTINCT
     | DISTRIBUTE
     | DIV
@@ -2557,10 +2269,8 @@ nonReserved
     | ESCAPE
     | ESCAPED
     | EVOLUTION
-    | EXACT
     | EXCHANGE
     | EXCLUDE
-    | EXCLUSIVE
     | EXECUTE
     | EXISTS
     | EXIT
@@ -2596,11 +2306,9 @@ nonReserved
     | GROUPING
     | HANDLER
     | HAVING
-    | HISTORY
     | HOUR
     | HOURS
     | IDENTIFIER_KW
-    | IDENTIFIED
     | IDENTITY
     | IF
     | IGNORE
@@ -2608,7 +2316,6 @@ nonReserved
     | IMPORT
     | IN
     | INCLUDE
-    | INCLUSIVE
     | INCREMENT
     | INDEX
     | INDEXES
@@ -2616,7 +2323,6 @@ nonReserved
     | INPUT
     | INPUTFORMAT
     | INSERT
-    | INSENSITIVE
     | INT
     | INTEGER
     | INTERVAL
@@ -2642,7 +2348,6 @@ nonReserved
     | LIST
     | LOAD
     | LOCAL
-    | LOCALTIME
     | LOCATION
     | LOCK
     | LOCKS
@@ -2652,12 +2357,9 @@ nonReserved
     | MACRO
     | MAP
     | MATCHED
-    | MATCH_CONDITION
     | MATERIALIZED
     | MAX
-    | MEASURE
     | MERGE
-    | METRICS
     | MICROSECOND
     | MICROSECONDS
     | MILLISECOND
@@ -2673,8 +2375,6 @@ nonReserved
     | NAMESPACES
     | NANOSECOND
     | NANOSECONDS
-    | NEAREST
-    | NEXT
     | NO
     | NONE
     | NORELY
@@ -2685,12 +2385,10 @@ nonReserved
     | OF
     | OFFSET
     | ONLY
-    | OPEN
     | OPTION
     | OPTIONS
     | OR
     | ORDER
-    | ORDINALITY
     | OUT
     | OUTER
     | OUTPUTFORMAT
@@ -2701,7 +2399,6 @@ nonReserved
     | PARTITION
     | PARTITIONED
     | PARTITIONS
-    | PATH
     | PERCENTLIT
     | PIVOT
     | PLACING
@@ -2713,11 +2410,9 @@ nonReserved
     | PROCEDURES
     | PROPERTIES
     | PURGE
-    | QUALIFY
     | QUARTER
     | QUERY
     | RANGE
-    | READ
     | READS
     | REAL
     | RECORDREADER
@@ -2747,7 +2442,6 @@ nonReserved
     | ROLLUP
     | ROW
     | ROWS
-    | SCD
     | SCHEMA
     | SCHEMAS
     | SECOND
@@ -2755,7 +2449,6 @@ nonReserved
     | SECURITY
     | SELECT
     | SEPARATED
-    | SEQUENCE
     | SERDE
     | SERDEPROPERTIES
     | SESSION_USER
@@ -2763,7 +2456,6 @@ nonReserved
     | SETS
     | SHORT
     | SHOW
-    | SIMILARITY
     | SINGLE
     | SKEWED
     | SMALLINT
@@ -2786,8 +2478,6 @@ nonReserved
     | SUBSTR
     | SUBSTRING
     | SYNC
-    | SYSTEM
-    | SYSTEM_PATH
     | SYSTEM_TIME
     | SYSTEM_VERSION
     | TABLE
@@ -2808,7 +2498,6 @@ nonReserved
     | TINYINT
     | TO
     | TOUCH
-    | TRACK
     | TRAILING
     | TRANSACTION
     | TRANSACTIONS
@@ -2821,11 +2510,9 @@ nonReserved
     | UNARCHIVE
     | UNBOUNDED
     | UNCACHE
-    | UNIFORM
     | UNIQUE
     | UNKNOWN
     | UNLOCK
-    | UNNEST
     | UNPIVOT
     | UNSET
     | UNTIL
@@ -2848,7 +2535,6 @@ nonReserved
     | WHILE
     | WHEN
     | WHERE
-    | WIDTH
     | WINDOW
     | WITH
     | WITHIN

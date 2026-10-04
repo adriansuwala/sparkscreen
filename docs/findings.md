@@ -495,3 +495,315 @@ came from Spark's own behaviour, and overwrite-versus-error came from executing 
 and counting rows. The grammar is a good oracle for *shape* and a poor one for
 *meaning*.
 
+## F17 — the `spark-4.0` grammar is not 4.0's grammar
+
+`src/sparkscreen/grammar/spec.py` declares `spark_versions=("4.0.0", "5.0.0")` for the
+`spark-4.0` spec. The pinned commit `3c28a9c093f1026d76e53d3eb2b846ffb28465c8` is dated
+2026-08-03. Spark 4.2.0 was released 2026-07-11. The pin is therefore a *post-4.2 master*
+grammar, about three weeks of development newer than the 4.2.0 tag, not the 4.0.0 grammar
+the key names.
+
+Measured against the upstream release grammars (rule inventory of `SqlBaseParser.g4`):
+
+| upstream | rules | missing from vendored | extra in vendored |
+|---|---|---|---|
+| v3.5.1 | 184 | 4 | 121 |
+| v4.0.0 | 239 | 5 | 67 |
+| v4.1.3 | 272 | 1 | 30 |
+| v4.2.0 | 283 | 0 | 18 |
+
+So it is a superset of 4.2.0 carrying 18 rules that belong to no released line —
+`asofJoinType`, `binByClause`, the `autoCdc*` family, `temporalTableIdentifier` and
+relatives.
+
+Two consequences, both verified through the shipped parser rather than inferred:
+
+**It over-accepts relative to what the key promises.** `FOREIGN KEY` / `PRIMARY KEY`
+constraints, `QUALIFY` and `WINDOW` all parse on it, and none of them exist in the 4.0.0
+grammar. A user who selects `spark-4.0` expecting 4.0 semantics gets a looser parser than
+4.0 is.
+
+**It never rejected anything a real engine accepts.** A 56-statement corpus spanning DDL,
+DML, scripts and the 4.1/4.2 feature set was parsed by real 4.1.3 and real 4.2.0 grammars
+— generated from the upstream release tags through sparkscreen's own
+`port_to_python`/`generate` — and by the shipped grammar. Zero statements were accepted by
+a real grammar and rejected by the shipped one. For a fail-closed screener that is the
+cheap direction to be wrong in: over-accepting costs precision, under-accepting costs a
+false `UNKNOWN` on working production code.
+
+This is not a new defect class. It is the same shape as the `Reason.PYTHON_DANGEROUS_CALL`
+invariant: a *capability claim* that stopped being true without saying so. The pin moved;
+the name and the version range did not.
+
+**Why we might be wrong.** Those 18 extra rules are on master and could be reverted before
+any release, in which case the grammar would quietly become 4.2-shaped and the pin should
+move to the 4.2.0 tag instead. The finding is about the mislabelling, not about the
+grammar being wrong.
+
+### F17 resolution
+
+The `spark-4.0` key is gone rather than renamed, and the 4.x line is now pinned to two real
+releases instead of one master snapshot:
+
+| key | commit | release | date |
+|---|---|---|---|
+| `spark-4.2` | `32f7299601108917fb01920a54e084595b7b3bf8` | v4.2.0 | 2026-07-11 |
+| `spark-4.1` | `77bbf77e86ad48f58b5dfbc6ac882b3e70cf1989` | v4.1.3 | 2026-07-11 |
+| `spark-3.5.1` | `fd86f85e181fc2dc0f50a096855acf83a6cc5d9c` | v3.5.1 | unchanged |
+
+Both new SHAs were resolved through the GitHub API and confirmed to be the release
+commits ("Preparing Spark release v4.1.3-rc1", "v4.2.0-rc6"), and all four vendored `.g4`
+files hash byte-identical to the upstream release grammars.
+
+Splitting rather than sharing was chosen on measurement, not taste. The cost of a second
+grammar turns out to be near zero where it hurts and real only in bytes:
+
+- **Effect table: no new entries.** The 4.2 label universe (111) is a subset of the old
+  113, and 4.1's one extra label, `InsertIntoReplaceWhere`, was already mapped at
+  `effects.py:171`. Zero uncovered labels across all three grammars.
+- **Wheel: +139 KB**, 509 KB to 648 KB. Sharing would have saved that and cost a false
+  negative on every 4.1 cluster.
+- **The `.g4` files are 98.8% identical** but split into 85 diff hunks spread from line 56
+  to line 2,657, so a shared-base scheme would need 85 hand-maintained splice points and
+  would no longer correspond to any upstream commit -- losing the SHA-pin property that is
+  the reason for vendoring verbatim.
+
+Two labels, `CreateFlowAutoCdc` and `CommentColumn`, became unreachable when the master
+snapshot was dropped. They are now in the documented policy-only drift set rather than
+pruned, because pruning the effect table is a policy decision and not this module's.
+
+`spec_for_spark_version` raises for an unsupported version rather than falling through to
+the newest grammar: a 4.0 user asking for their own version must not be handed 4.2 syntax,
+which is this same finding wearing a different hat.
+
+## F18 — 4.1 and 4.2 grammars diverge in six user-facing features
+
+The plan was to share one grammar between 4.1 and 4.2 on the bet that they do not diverge.
+They do. Real 4.1.3 and real 4.2.0 grammars, both generated from the upstream release tags
+and both queried through the same entry rule (`compoundOrSingleStatement`), disagree on six
+constructs:
+
+| feature | introduced | 4.1.3 | 4.2.0 |
+|---|---|---|---|
+| `QUALIFY` clause | 4.2 | rejects | accepts |
+| `CHANGES FROM VERSION <int>` | 4.2 | rejects | accepts |
+| `CHANGES FROM VERSION '<str>'` | 4.2 | rejects | accepts |
+| `CHANGES FROM SYSTEM_VERSION a TO VERSION b` | 4.2 | rejects | accepts |
+| `JOIN ... APPROX NEAREST BY DISTANCE` | 4.2 | rejects | accepts |
+| `JOIN ... EXACT NEAREST BY SIMILARITY` | 4.2 | rejects | accepts |
+
+At the rule level 4.2 adds 12 rules over 4.1 (`qualifyClause`, `changesClause`,
+`streamChangesClause`, `nearestByClause`, `tableFunctionCall`, `withLocalTimeZone`,
+`withoutTimeZone`, `pathElement`, `codeLiteral`, `identifiedByClause`,
+`singlePathElementList`, `tableFunctionCallWithTrailingClauses`) and drops one
+(`functionTable`).
+
+All six divergences are *additive in 4.2*. One grammar can therefore serve both lines for
+screening purposes — the union accepts everything either engine accepts — at the cost of
+accepting `QUALIFY`/`CHANGES`/`NEAREST` against a real 4.1 cluster, where the statement
+would fail at the engine. That is an imprecision in verdicts, not a false `UNKNOWN`. Since
+the verdict set has no state for "this parses but the engine would reject it", the honest
+description is that a shared 4.1/4.2 grammar is sound but imprecise in one direction, and
+that direction is the cheap one.
+
+The six test statements were corrected twice after first drafts failed on **both**
+grammars. `CHANGES FROM VERSION => 1` is invalid — `version` is `INTEGER_VALUE |
+stringLit`, with no arrow. `JOIN APPROX NEAREST BY DISTANCE` is invalid without the
+`APPROX`/`EXACT` prefix that `nearestByClause` requires. A probe that reports a defect
+where two independent real grammars agree that nothing is wrong is measuring the probe.
+Derive the SQL from the upstream rule bodies rather than from memory of the syntax.
+
+## F19 — Spark 3.4 needs a mapping entry, not a grammar; 3.3 and earlier are correctly absent
+
+The 3.5.1 grammar's rule set is a strict superset of 3.4's: 184 rules against 172, and
+`rules(3.4) - rules(3.5.1)` is **empty**. No 3.4-only rule survives into 3.5. A 12-statement
+3.4-era corpus — CTAS with `USING`, `MERGE`, `INSERT OVERWRITE`, `INTERSECT`/`EXCEPT`,
+`CAST` to `ARRAY<INT>`, `ADD COLUMNS`, `TABLESAMPLE`, `CREATE OR REPLACE TEMPORARY VIEW` —
+parses 12/12 on the shipped 3.5.1 grammar.
+
+So if a 3.4 user appears, 3.4 support is one version-mapping entry in `SPECS`: no vendored
+grammar, no generated parser. It was not built now because 3.4 is past end of life
+(2024-10-21), 3.3 ended 2023-12-09, and the only managed runtime still on 3.4 is Databricks
+Runtime 13.3 LTS (Spark 3.4.1), which leaves support 2026-08-22.
+
+This is the F-numbers equivalent of a measured gap list: what 3.4 support would cost is now
+a number rather than an assumption, so the decision not to build it is revisitable the
+moment someone asks.
+
+**Popularity context.** pyspark PyPI downloads, last 90 days (pepy.tech; includes CI
+traffic, so stale pins are over-represented): 3.5.x 25.0%, 4.2 16.8%, 3.4 7.8%, 3.3 5.0%,
+4.1 4.9%, 4.0 4.1%, other 36.3%. Managed platforms skew older than that: EMR ships 3.5.x
+through 7.13, GCP's default image 2.2 is Spark 3.5.3, and Databricks Runtime 15.4/16.4 LTS
+are both Spark 3.5. Upstream support ends 2026-11-23 for 4.0 and runs to 2027-11-30 for
+the 3.5 LTS.
+
+## F20 — the "dollar-quoted strings" surface claim was never true, and the syntax is unreachable anyway
+
+The pre-F17 `spec.py` described the 4.x grammar as having "dollar-quoted strings" in its
+surface. Three separate things were wrong with that, and only the first is obvious.
+
+**It was not in 4.0, or 4.1.** Counting `DOLLAR` mentions in each upstream lexer: the
+spark-3.5.1 and spark-4.1 grammars have **zero**; spark-4.2 has 7. The construct postdates
+4.1 entirely, so the claim was wrong for every line except 4.2 -- and no spark-4.0 grammar
+ever shipped.
+
+**It is not a string-literal position.** `SELECT $$abc$$` does not parse on any pinned
+grammar. `codeLiteral` is a *statement-level* rule
+(`codeLiteral: BEGIN_DOLLAR_QUOTED_STRING DOLLAR_QUOTED_STRING_BODY+ END_DOLLAR_QUOTED_STRING`),
+used by `createMetricView` (`AS codeLiteral`) and by nothing else.
+
+**In upstream 4.2.0 it is unreachable from `statement` anyway.** `codeLiteral` is defined at
+line 1618 of the vendored `SqlBaseParser.g4` but appears in **no** labeled alternative of
+`statement` — the rule has 91 alternatives and this is not among them. So a bare `$$abc$$`
+does not parse, and `CodeLiteral` is absent from the derived label universe for all three
+grammars. `screen()` returns `UNKNOWN` for every dollar-quoted form tried, on every grammar,
+which is the fail-closed outcome and also the truthful one: no pinned Spark release accepts
+this syntax at top level.
+
+**Correction, found later by the label derivation.** I wrote that `codeLiteral` was used only
+by `createMetricView`, which is true, and then treated the whole construct as dead. That
+conclusion does not follow. The derivation for `spark-4.2` reports **`CreateMetricView` as a
+reachable label**, and it is one of the nine labels 4.2 has that 4.1 does not. So the rule is
+unreachable *as a bare statement*, not unreachable *full stop* — and the live engine agrees
+in the same way: `CREATE METRIC VIEW` fails, but at the word `METRIC`, because that keyword
+is not in the upstream lexer either. Two independent gates, neither of which is "this syntax
+does not exist".
+
+The distinction that survives: no pinned Spark release parses a dollar-quoted literal in any
+position, so `UNKNOWN` remains correct for every form. But "the parser cannot reach it" and
+"the syntax is not implemented" are different claims, and only the first is established. A
+future release could add `METRIC` to its lexer and the rule would start being reachable with
+no grammar change at all, at which point `spark-4.2` would need to be re-pinned to stay
+honest. Worth knowing, since the pin-identity guard would flag exactly that move.
+
+So the claim was a capability assertion with nothing behind it — the same shape as the
+`Reason.PYTHON_DANGEROUS_CALL` invariant and as F17 itself. It was not caught by any test
+because no test asserted it, and the comment that carried it was edited in the same commit
+that moved the pin. Correcting it is the whole fix; there is no detection work to do, because
+there is nothing reachable to detect.
+
+**Process note.** This sat open across three findings because each investigation re-read the
+comment and did not test it. The check that would have settled it in one command is counting
+the token in each *pinned* lexer rather than reasoning about which grammar was intended.
+
+### F20 resolution
+
+The false claim is gone from `spec.py`. The per-line comment block now describes only what
+each grammar actually has, and `spark-4.2`'s entry names its real 4.2 additions. There is
+no detection change: `UNKNOWN` was already correct for every dollar-quoted form, on every
+pinned grammar, because upstream 4.2.0 itself cannot parse one at top level.
+
+Recorded rather than merely deleted, because the generalisable failure is the interesting
+part: a comment asserting a capability is a claim, and it needs the same evidence as any
+other claim. A lexer-token count across the pinned grammars settles it in one command.
+
+## F21 — all seven 4.2 divergences confirmed against a live Spark 4.2.0 engine
+
+Every 4.x claim up to here was grammar-level: generated parsers and read rule bodies. A
+pyspark 4.2.0 engine on JDK 17 was installed into a scratch venv and used to check them
+against the real Catalyst parser, so the answers no longer rest on reading a `.g4`.
+
+**The discriminator matters.** `spark.sql()` conflates parse failure with analysis failure,
+and a first pass through it reported 12 rejections that were ambiguous — `CHANGES FROM` on a
+catalog without CDC, `CALL sys.system_info()` on an unresolvable routine, and `DROP TABLE t`
+on a table that did not exist all "failed" while their syntax was perfectly valid. The engine's
+parser called directly —
+
+    spark._jsparkSession.sessionState().sqlParser().parsePlan(sql)
+
+— throws only on a syntax error and returns otherwise, which is exactly the question
+sparkscreen asks. A live differential that goes through `spark.sql()` will manufacture
+false divergences; that is a trap worth naming, because the first version of this probe hit it.
+
+**Confirmed, on all seven:**
+
+| construct | parses on 4.2.0 |
+|---|---|
+| `QUALIFY` | yes |
+| `CHANGES FROM VERSION 1` | yes |
+| `CHANGES FROM SYSTEM_VERSION 1 TO VERSION 9` | yes |
+| `JOIN ... APPROX NEAREST BY DISTANCE` | yes |
+| `JOIN ... EXACT NEAREST BY SIMILARITY` | yes |
+| `INSERT ... REPLACE WHERE` | yes |
+| `INSERT ... REPLACE USING (a)` | yes |
+
+The 4.1-era surface also parses on 4.2.0, so 4.1 is a subset in practice as well as in rule
+sets: `PRIMARY KEY`, `FOREIGN KEY`, `CREATE STREAMING TABLE`, the `WINDOW` clause,
+`TABLESAMPLE`, `REPLACE WHERE`, `CALL`, `EXECUTE IMMEDIATE`, and compound `BEGIN ... END`.
+
+**F20 re-confirmed by a second route.** Dollar quoting fails to parse on a real 4.2.0 engine
+in every position tried — `SELECT $$abc$$`, bare `$$abc$$`, tagged `$tag$abc$tag$`, and as an
+`EXECUTE IMMEDIATE` payload. Independently, `createMetricView` (the only user of
+`codeLiteral`) turns out to be dead upstream for a *second* reason: the rule exists at
+`SqlBaseParser.g4:337` but its `METRIC` keyword is **not in the lexer**, so
+`CREATE METRIC VIEW ...` is itself a parse error. The construct is doubly unreachable, which
+is a stronger statement than F20 made from the grammar alone.
+
+**Two probes of mine were wrong, and both were caught by the engine.**
+
+`SELECT 1 |> double` was labelled "4.0 surface" and rejected. It is not a grammar gap: the
+pipe operator is **absent from the vendored 4.2 grammar itself**, and the engine rejects it
+too — it is gated on a config upstream that this build does not enable. Our grammar agrees
+with the engine, which is the correct behaviour, and the label was the error. The grammar
+comment about `|` vs `|>` compatibility sits at lines 58-66 of the parser grammar, so the
+syntax is known upstream and deliberately not in the default surface.
+
+`CREATE METRIC VIEW mv AS $$...$$` was rejected at the word `METRIC`, not at `$$` — a
+different failure than the one I was testing for, and only visible because I checked the
+error text rather than the boolean.
+
+**What this settles.** It closes the gap that every 4.x finding so far rested on grammar
+reading alone. F22 takes the same step for 4.1.3 and 3.5.1, so all three lines are now
+engine-verified rather than one of three.
+
+## F22 — spark-4.1 verified against a live 4.1.3 engine; the split is engine-justified
+
+F21 confirmed the 4.2 side against a live 4.2.0 and left 4.1 grammar-verified only. A
+pyspark 4.1.3 engine closes that.
+
+**The differential suite runs clean on 4.1.3: 90 passed, 0 skipped** (against 84 passed /
+6 skipped on 4.2.0, where the skips are the 4.2-only leg by design). All 90 collected on the
+first attempt here, which also confirms the `bp4` collect-count guard is not tuned to one
+engine.
+
+**Re-derived independently rather than trusting the recorded table.** `ENGINE_EXPECTATIONS`
+already asserts our grammar matches what each engine was observed to do, which is circular if
+the table itself is wrong. So the 4.1 answer was taken straight from the engine's parser and
+compared to the shipped `spark-4.1` grammar, 14 constructs, **0 mismatches**:
+
+| construct | live 4.1.3 | `spark-4.1` |
+|---|---|---|
+| `QUALIFY` | reject | reject |
+| `CHANGES FROM VERSION 1` | reject | reject |
+| `CHANGES FROM SYSTEM_VERSION 1 TO VERSION 9` | reject | reject |
+| `JOIN ... APPROX NEAREST` | reject | reject |
+| `JOIN ... EXACT NEAREST` | reject | reject |
+| `INSERT ... REPLACE ON` (4.2 half of the split) | reject | reject |
+| `PRIMARY KEY` / `FOREIGN KEY` | accept | accept |
+| `CREATE STREAMING TABLE` | accept | accept |
+| `TABLESAMPLE` | accept | accept |
+| `INSERT ... REPLACE WHERE` (4.1 half) | accept | accept |
+| `CALL` / `EXECUTE IMMEDIATE` / `BEGIN ... END` | accept | accept |
+
+This is what makes two grammars rather than one the right call, and it is now a statement
+about engine behaviour on both lines instead of a reading of two `.g4` files. Had any
+4.2-only construct parsed on real 4.1.3, the union grammar would have been sound after all
+and the +139 KB would have bought nothing.
+
+**And 3.5.1 too, so all three lines are engine-verified.** `.venv-pyspark` predates the hr0
+rename, so its run was repeated against the current three-grammar tree rather than assumed to
+still hold: **87 passed, 3 skipped** (the skips are constructs 3.5.1 is expected to reject).
+
+| engine | result | grammar resolved |
+|---|---|---|
+| pyspark 3.5.1 | 87 passed, 3 skipped | `spark-3.5.1` |
+| pyspark 4.1.3 | 90 passed, 0 skipped | `spark-4.1` |
+| pyspark 4.2.0 | 84 passed, 6 skipped | `spark-4.2` |
+
+`grammar_key_for_engine()` was checked to resolve each engine to its *own* grammar. That
+matters because the bug it replaced was a two-way ternary that silently mapped the middle
+engine onto the newest grammar -- so "the 3.5.1 leg passed" is only meaningful if the leg
+really screened with `spark-3.5.1`, and that is now asserted rather than assumed.
+
+Every engine this project supports has therefore been run against it, and the CI matrix is
+reproducing locally on all three legs before its first run.

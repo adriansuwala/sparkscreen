@@ -112,7 +112,7 @@ class TestWheelContents:
         import zipfile
 
         names = zipfile.ZipFile(built_wheel).namelist()
-        for spec in ("spark_3_5_1", "spark_4_0"):
+        for spec in ("spark_3_5_1", "spark_4_2"):
             lexer = f"sparkscreen/grammar/generated/{spec}/SqlBaseLexer.py"
             parser = f"sparkscreen/grammar/generated/{spec}/SqlBaseParser.py"
             assert lexer in names, f"{lexer} missing from the wheel"
@@ -152,10 +152,16 @@ class TestWheelContents:
         # CI runner, so shelling out to it failed with FileNotFoundError: 'uv' before the
         # wheel was ever installed -- a test that could not run where it matters most.
         # `python -m venv` is everywhere Python is.
+        # Both subprocesses run with PYTHONPATH stripped. The venv interpreter would
+        # otherwise import sparkscreen from the CHECKOUT rather than from the wheel, and
+        # the test would pass while proving nothing about the artefact. pyproject sets
+        # `pythonpath = ["src"]` for pytest and anything wrapping this does the same, so
+        # this is the normal state of the world, not an exotic one.
+        install_env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
         sp.run([_sys.executable, "-m", "venv", str(venv)], check=True,
-               capture_output=True)
+               capture_output=True, env=install_env)
         sp.run([str(venv / "bin/python"), "-m", "pip", "install", "-q",
-                str(built_wheel)], check=True, capture_output=True)
+                str(built_wheel)], check=True, capture_output=True, env=install_env)
 
         # PATH is an EMPTY directory, not /usr/bin:/bin. GitHub's ubuntu runners
         # preinstall a JDK at /usr/bin/java, so a PATH that keeps the usual system
@@ -164,7 +170,15 @@ class TestWheelContents:
         # path. Same reasoning as the `wheel` job in ci.yml, which uses /tmp/empty-bin.
         empty_bin = tmp_path / "empty-bin"
         empty_bin.mkdir()
+        # PYTHONPATH must be dropped, not merely unset. The parent process may have src/
+        # on it (pyproject sets `pythonpath = ["src"]` for pytest, and any wrapper that
+        # exports it does the same), and the venv interpreter below would then import
+        # sparkscreen from the CHECKOUT instead of from the wheel just installed -- which
+        # is the one thing this test must not do. Verified: with PYTHONPATH pointing at
+        # src/ this test fails with ModuleNotFoundError, because the checkout's imports
+        # drag in packages the bare venv does not have.
         clean_env = {"PATH": str(empty_bin), "HOME": os.environ.get("HOME", "/tmp")}
+        clean_env.pop("PYTHONPATH", None)
         code = (
             "import shutil;"
             "assert shutil.which('java') is None, 'java leaked onto PATH';"

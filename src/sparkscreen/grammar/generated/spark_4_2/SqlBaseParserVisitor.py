@@ -143,11 +143,6 @@ class SqlBaseParserVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SqlBaseParser#singleTemporalTableIdentifier.
-    def visitSingleTemporalTableIdentifier(self, ctx:SqlBaseParser.SingleTemporalTableIdentifierContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by SqlBaseParser#singleMultipartIdentifier.
     def visitSingleMultipartIdentifier(self, ctx:SqlBaseParser.SingleMultipartIdentifierContext):
         return self.visitChildren(ctx)
@@ -543,11 +538,6 @@ class SqlBaseParserVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SqlBaseParser#commentColumn.
-    def visitCommentColumn(self, ctx:SqlBaseParser.CommentColumnContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by SqlBaseParser#refreshTable.
     def visitRefreshTable(self, ctx:SqlBaseParser.RefreshTableContext):
         return self.visitChildren(ctx)
@@ -625,11 +615,6 @@ class SqlBaseParserVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SqlBaseParser#createPipelineInsertIntoFlow.
     def visitCreatePipelineInsertIntoFlow(self, ctx:SqlBaseParser.CreatePipelineInsertIntoFlowContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SqlBaseParser#createFlowAutoCdc.
-    def visitCreateFlowAutoCdc(self, ctx:SqlBaseParser.CreateFlowAutoCdcContext):
         return self.visitChildren(ctx)
 
 
@@ -988,46 +973,6 @@ class SqlBaseParserVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SqlBaseParser#autoCdcCommand.
-    def visitAutoCdcCommand(self, ctx:SqlBaseParser.AutoCdcCommandContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SqlBaseParser#autoCdcBody.
-    def visitAutoCdcBody(self, ctx:SqlBaseParser.AutoCdcBodyContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SqlBaseParser#autoCdcParameters.
-    def visitAutoCdcParameters(self, ctx:SqlBaseParser.AutoCdcParametersContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SqlBaseParser#autoCdcDeleteClause.
-    def visitAutoCdcDeleteClause(self, ctx:SqlBaseParser.AutoCdcDeleteClauseContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SqlBaseParser#autoCdcSequenceByClause.
-    def visitAutoCdcSequenceByClause(self, ctx:SqlBaseParser.AutoCdcSequenceByClauseContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SqlBaseParser#autoCdcColumnsClause.
-    def visitAutoCdcColumnsClause(self, ctx:SqlBaseParser.AutoCdcColumnsClauseContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SqlBaseParser#autoCdcStoredAsClause.
-    def visitAutoCdcStoredAsClause(self, ctx:SqlBaseParser.AutoCdcStoredAsClauseContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SqlBaseParser#autoCdcTrackHistoryClause.
-    def visitAutoCdcTrackHistoryClause(self, ctx:SqlBaseParser.AutoCdcTrackHistoryClauseContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by SqlBaseParser#identifierReference.
     def visitIdentifierReference(self, ctx:SqlBaseParser.IdentifierReferenceContext):
         return self.visitChildren(ctx)
@@ -1313,11 +1258,6 @@ class SqlBaseParserVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SqlBaseParser#binByClause.
-    def visitBinByClause(self, ctx:SqlBaseParser.BinByClauseContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by SqlBaseParser#lateralView.
     def visitLateralView(self, ctx:SqlBaseParser.LateralViewContext):
         return self.visitChildren(ctx)
@@ -1345,21 +1285,6 @@ class SqlBaseParserVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SqlBaseParser#joinRelation.
     def visitJoinRelation(self, ctx:SqlBaseParser.JoinRelationContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SqlBaseParser#asofJoinType.
-    def visitAsofJoinType(self, ctx:SqlBaseParser.AsofJoinTypeContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SqlBaseParser#joinPostfix.
-    def visitJoinPostfix(self, ctx:SqlBaseParser.JoinPostfixContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SqlBaseParser#asofJoinCriteria.
-    def visitAsofJoinCriteria(self, ctx:SqlBaseParser.AsofJoinCriteriaContext):
         return self.visitChildren(ctx)
 
 
@@ -1463,18 +1388,8 @@ class SqlBaseParserVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SqlBaseParser#unnestTable.
-    def visitUnnestTable(self, ctx:SqlBaseParser.UnnestTableContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by SqlBaseParser#tableValuedFunction.
     def visitTableValuedFunction(self, ctx:SqlBaseParser.TableValuedFunctionContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SqlBaseParser#unnest.
-    def visitUnnest(self, ctx:SqlBaseParser.UnnestContext):
         return self.visitChildren(ctx)
 
 
@@ -1565,16 +1480,6 @@ class SqlBaseParserVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SqlBaseParser#tableIdentifier.
     def visitTableIdentifier(self, ctx:SqlBaseParser.TableIdentifierContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SqlBaseParser#temporalTableIdentifier.
-    def visitTemporalTableIdentifier(self, ctx:SqlBaseParser.TemporalTableIdentifierContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SqlBaseParser#temporalTableIdentifierReference.
-    def visitTemporalTableIdentifierReference(self, ctx:SqlBaseParser.TemporalTableIdentifierReferenceContext):
         return self.visitChildren(ctx)
 
 
@@ -2410,16 +2315,6 @@ class SqlBaseParserVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SqlBaseParser#alterColumnAction.
     def visitAlterColumnAction(self, ctx:SqlBaseParser.AlterColumnActionContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SqlBaseParser#columnCommentList.
-    def visitColumnCommentList(self, ctx:SqlBaseParser.ColumnCommentListContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SqlBaseParser#columnComment.
-    def visitColumnComment(self, ctx:SqlBaseParser.ColumnCommentContext):
         return self.visitChildren(ctx)
 
 

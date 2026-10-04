@@ -53,7 +53,7 @@ def try_parse(spec_key, sql, strategy):
 
 
 def main() -> int:
-    spec_key = sys.argv[1] if len(sys.argv) > 1 else "spark-4.0"
+    spec_key = sys.argv[1] if len(sys.argv) > 1 else "spark-4.2"
     strict_only = 0
     print(f"grammar: {spec_key}\n")
     print(f"{'input':38} {'default':>10} {'strict':>10}  verdict")

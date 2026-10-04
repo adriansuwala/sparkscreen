@@ -607,7 +607,7 @@ class TestLabelUniverseContainsOnlyStatementLabels:
     vocabulary gets promoted to load-bearing.
     """
 
-    @pytest.mark.parametrize("spec_key", ["spark-4.0", "spark-3.5.1"])
+    @pytest.mark.parametrize("spec_key", ["spark-4.2", "spark-3.5.1"])
     def test_no_private_or_non_rule_names_leak_into_the_universe(self, spec_key):
         """The universe stays a set of statement labels, whatever the walk encounters.
 
@@ -637,7 +637,7 @@ class TestLabelUniverseContainsOnlyStatementLabels:
         not_strings = sorted(x for x in labels if not isinstance(x, str))
         assert not not_strings, f"{spec_key}: non-string labels: {not_strings}"
 
-    @pytest.mark.parametrize("spec_key", ["spark-4.0", "spark-3.5.1"])
+    @pytest.mark.parametrize("spec_key", ["spark-4.2", "spark-3.5.1"])
     def test_every_derived_label_is_really_mapped(self, spec_key):
         """The totality invariant itself, restated against the derivation.
 
@@ -772,7 +772,7 @@ SURVIVORS_NOT_COVERED = {
     #    They survive because the arm is DEAD, not because the damage is cosmetic.
     #    `Policy.evaluate_statement` returns non-empty on every path (both limit early
     #    returns, the no-positive-rule early return, and the trailing append), checked
-    #    over the full label universe (114 labels: labels_for_grammar('spark-4.0') |
+    #    over the full label universe (114 labels: labels_for_grammar('spark-4.2') |
     #    labels_for_grammar('spark-3.5.1')) x 4 policy shapes (default, zero rules, a
     #    rule matching one label only, read_only) x 4 input shapes, plus a
     #    zero-limits policy to reach both limit early returns -- 2280 calls, zero empty.

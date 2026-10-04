@@ -48,8 +48,8 @@ from sparkscreen.grammar.parser import SqlSyntaxError, get_parser
 #: Both pinned grammars, by key. The `spec_key` fixture in conftest.py already
 #: parametrizes over these; tests that need a *specific* one (a 4.0-only syntax)
 #: use these constants directly.
-BOTH = ("spark-4.0", "spark-3.5.1")
-V4 = "spark-4.0"
+BOTH = ("spark-4.2", "spark-3.5.1")
+V4 = "spark-4.2"
 V351 = "spark-3.5.1"
 
 

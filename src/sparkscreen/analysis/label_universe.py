@@ -6,17 +6,21 @@ So the set itself has to be derived mechanically, not from a SQL corpus.
 
 A corpus is not sufficient on its own, and this is the reason: a corpus can only
 demonstrate the labels you thought to write SQL for. `CreatePipelineDataset` and
-`CreateFlowAutoCdc` are real, reachable top-level statements in spark-4.0 that no
-hand-written corpus would stumble into, and a coverage test built on a corpus would
-happily pass with both of them unmapped. The generated parser classes, by contrast,
+`CreateFlowAutoCdc` were real, reachable top-level statements in the post-4.2 master
+grammar this module was written against -- that snapshot is gone now (F17 re-pinned the
+4.x lines to the actual 4.1 and 4.2 releases, and neither construct appears in either),
+but they are the standing example of why a corpus cannot stand in for a derivation. The
+argument does not depend on those two labels still existing: any label reachable only
+through a rule the corpus never fires is invisible to a corpus-based coverage test, and
+that test would pass with it unmapped. The generated parser classes, by contrast,
 already contain the complete answer: ANTLR emits one `<Label>Context` class per
 labeled alternative of every rule, and inheritance encodes which rule each belongs to.
 
 ## The derivation
 
 1. **Entry shapes.** `top_level_statement_contexts` (in `treewalk`) can yield contexts
-   under exactly three holders: `SingleStatementContext` (both grammars),
-   `CompoundBodyContext` and `CompoundStatementContext` (4.0's BEGIN...END scripts).
+   under exactly three holders: `SingleStatementContext` (all grammars),
+   `CompoundBodyContext` and `CompoundStatementContext` (the 4.x BEGIN...END scripts).
    Starting anywhere else would collect labels that can never reach a policy.
 
 2. **Labeled alternatives of a rule** are the direct subclasses of that rule's
@@ -45,6 +49,7 @@ effect entries for them forever.
 from __future__ import annotations
 
 import importlib
+from types import ModuleType
 from typing import Iterator
 
 from ..grammar.spec import SPECS, get_spec
@@ -127,9 +132,23 @@ def labels_for_grammar(grammar_key: str | None = None) -> frozenset[str]:
     """Every label `effective_label()` can return under one pinned grammar.
 
     `grammar_key=None` means the default grammar, matching `get_spec(None)`.
+
+    Resolves the spec out of `SPECS` by key, so it can only ever describe a grammar this
+    package ships. `labels_for_parser_module` is the same walk over an arbitrary imported
+    `SqlBaseParser` module -- which is what a pin-identity test needs, since its subject
+    is a grammar built outside the package tree that no key can name.
     """
     spec = get_spec(grammar_key)
     module = importlib.import_module(f"{spec.python_module('SqlBaseParser')}")
+    return labels_for_parser_module(module)
+
+
+def labels_for_parser_module(module: ModuleType) -> frozenset[str]:
+    """`labels_for_grammar`, over an already-imported `SqlBaseParser` module.
+
+    Split out so the derivation has exactly one implementation. A test that re-derives
+    the label set by its own traversal is a second implementation, and the two drift.
+    """
     classes = _context_classes(module.SqlBaseParser)
 
     labels: set[str] = set()

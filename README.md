@@ -99,8 +99,8 @@ Effect.DESTROY_DATA in r.effects   # True    — the mode is a literal, so this 
 ```
 
 An unknown destination does not erase a known effect. 122 statement labels are mapped
-across both grammars, and an unmapped label raises rather than quietly producing a finding
-with no effects.
+across all three grammars, and an unmapped label raises rather than quietly producing a
+finding with no effects.
 
 ## Policy
 
@@ -139,12 +139,15 @@ tell".
 
 ## Spark versions
 
-`spark-4.0` and `spark-3.5.1`, each pinned to a **full immutable commit** of Spark's own
-grammar — never a branch, never a movable tag. Both generated with ANTLR 4.13.1.
+`spark-4.2`, `spark-4.1` and `spark-3.5.1`, each pinned to a **full immutable commit** of
+Spark's own grammar — never a branch, never a movable tag. All generated with ANTLR
+4.13.1. Each pin is the release it names, so `spark-4.1` rejects the 4.2-only syntax
+(`QUALIFY`, `CHANGES`, `APPROX`/`EXACT NEAREST`) that a real 4.1 engine also rejects.
 
 ```bash
 sparkscreen --list-grammars
 sparkscreen --spark 3.5.1 job.py
+sparkscreen --spark 4.1 job.py
 ```
 
 Grammar acceptance is not semantic validity — Spark's analyzer applies further checks

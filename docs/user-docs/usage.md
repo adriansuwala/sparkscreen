@@ -223,13 +223,20 @@ means "we couldn't tell".
 
 | grammar key | Spark | ANTLR |
 |---|---|---|
-| `spark-4.0` | 4.0.x, 5.0.x | 4.13.1 |
+| `spark-4.2` | 4.2.x | 4.13.1 |
+| `spark-4.1` | 4.1.x | 4.13.1 |
 | `spark-3.5.1` | 3.5.1 | 4.13.1 |
 
 Grammars are pinned to full 40-character commit SHAs, never a branch or a tag. This is a
-correctness property, not tidiness: the two grammars disagree on `CALL`, `|>` and
-`BEGIN…END`, so a moving tag would change verdicts for released code with no diff to show
-for it.
+correctness property, not tidiness: the grammars disagree — 3.5.1 rejects `CALL`, `|>` and
+`BEGIN…END`, and 4.1 rejects `QUALIFY`, `CHANGES` and `APPROX`/`EXACT NEAREST` — so a moving
+tag would change verdicts for released code with no diff to show for it.
+
+Each pin is the release its key names. An earlier `spark-4.0` key shipped with a pin dated
+three weeks after the 4.2.0 release, so it accepted syntax no 4.0 engine runs; that key is
+gone, and `spec_for_spark_version` now raises for an unsupported version instead of falling
+through to the newest grammar. Spark 4.0 is not supported — upstream support ended
+2026-11-23.
 
 `--spark` accepts either form — `3.5.1`, `v3.5.1`, or `spark-3.5.1`.
 

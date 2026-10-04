@@ -33,7 +33,7 @@ EXIT_ALLOW = 0
 EXIT_DENY = 1
 EXIT_UNKNOWN = 2
 
-#: Public grammar keys, e.g. "spark-4.0". Note the dots: these are CLI-facing names and
+#: Public grammar keys, e.g. "spark-4.2". Note the dots: these are CLI-facing names and
 #: are deliberately not valid Python identifiers, so `--list-grammars` prints them while
 #: the generated package directories use underscore names.
 SPEC_KEYS = frozenset(s.key for s in SPECS)
