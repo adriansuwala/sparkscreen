@@ -79,8 +79,9 @@ SQLite DB and will silently disagree with a hand-edited JSONL.
 ## Current state (2026-10-04)
 
 - 0.8.0 — pre-1.0; see `sparkscreen.VERSION_NOTES` for why
-- 3,806 tests passing without a JVM, 3,833 with one (the extra 27 are the pin-identity
-  guard, which generates parsers and is skipped when no JVM is present)
+- 3,830 tests passing without a JVM, 3,941 with one (the extra 27 are the pin-identity
+  guard, which generates parsers and is skipped when no JVM is present; a further 90
+  differential tests only collect when the matching engine is installed)
 - Three pinned grammars: `spark-4.2`, `spark-4.1`, `spark-3.5.1`
 - 18 differential expectations (6 per engine), all three verified against live engines
 - 122 statement labels mapped to `Effect` flags; the derived label universe across all
@@ -190,6 +191,12 @@ The checks map onto CI jobs:
 | `differential` | differential | a JVM and a pinned pyspark |
 | `audits` | docs | nothing |
 | `grammar-clean` | grammar-build | a JVM |
+| (pytest, in `fast`) | fast | nothing |
+
+`tests/test_ci_workflow.py` is the one guard with no `ci_checks.py` entry, because it is
+part of the fast suite rather than a separate gate. It parses every `run:` block in
+`.github/workflows/ci.yml` and hands each to `bash -n`: shell embedded in YAML is seen by
+nothing else in this repo, including the guards written to protect it (F25).
 
 `grammar-clean` regenerates the parsers from the pinned grammars and fails on any diff. It
 is the check that keeps a pin edit from leaving the committed generated code disagreeing
