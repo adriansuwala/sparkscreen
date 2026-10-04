@@ -636,3 +636,47 @@ traffic, so stale pins are over-represented): 3.5.x 25.0%, 4.2 16.8%, 3.4 7.8%, 
 through 7.13, GCP's default image 2.2 is Spark 3.5.3, and Databricks Runtime 15.4/16.4 LTS
 are both Spark 3.5. Upstream support ends 2026-11-23 for 4.0 and runs to 2027-11-30 for
 the 3.5 LTS.
+
+## F20 — the "dollar-quoted strings" surface claim was never true, and the syntax is unreachable anyway
+
+The pre-F17 `spec.py` described the 4.x grammar as having "dollar-quoted strings" in its
+surface. Three separate things were wrong with that, and only the first is obvious.
+
+**It was not in 4.0, or 4.1.** Counting `DOLLAR` mentions in each upstream lexer: the
+spark-3.5.1 and spark-4.1 grammars have **zero**; spark-4.2 has 7. The construct postdates
+4.1 entirely, so the claim was wrong for every line except 4.2 -- and no spark-4.0 grammar
+ever shipped.
+
+**It is not a string-literal position.** `SELECT $$abc$$` does not parse on any pinned
+grammar. `codeLiteral` is a *statement-level* rule
+(`codeLiteral: BEGIN_DOLLAR_QUOTED_STRING DOLLAR_QUOTED_STRING_BODY+ END_DOLLAR_QUOTED_STRING`),
+used by `createMetricView` (`AS codeLiteral`) and by nothing else.
+
+**In upstream 4.2.0 it is unreachable from `statement` anyway.** `codeLiteral` is defined at
+line 1618 of the vendored `SqlBaseParser.g4` but appears in **no** labeled alternative of
+`statement` — the rule has 91 alternatives and this is not among them. So a bare `$$abc$$`
+does not parse, and `CodeLiteral` is absent from the derived label universe for all three
+grammars. `screen()` returns `UNKNOWN` for every dollar-quoted form tried, on every grammar,
+which is the fail-closed outcome and also the truthful one: no pinned Spark release accepts
+this syntax at top level.
+
+So the claim was a capability assertion with nothing behind it — the same shape as the
+`Reason.PYTHON_DANGEROUS_CALL` invariant and as F17 itself. It was not caught by any test
+because no test asserted it, and the comment that carried it was edited in the same commit
+that moved the pin. Correcting it is the whole fix; there is no detection work to do, because
+there is nothing reachable to detect.
+
+**Process note.** This sat open across three findings because each investigation re-read the
+comment and did not test it. The check that would have settled it in one command is counting
+the token in each *pinned* lexer rather than reasoning about which grammar was intended.
+
+### F20 resolution
+
+The false claim is gone from `spec.py`. The per-line comment block now describes only what
+each grammar actually has, and `spark-4.2`'s entry names its real 4.2 additions. There is
+no detection change: `UNKNOWN` was already correct for every dollar-quoted form, on every
+pinned grammar, because upstream 4.2.0 itself cannot parse one at top level.
+
+Recorded rather than merely deleted, because the generalisable failure is the interesting
+part: a comment asserting a capability is a claim, and it needs the same evidence as any
+other claim. A lexer-token count across the pinned grammars settles it in one command.
