@@ -22,8 +22,11 @@ jobs:
     # precisely because the everyday environment has no Spark in it (pyproject.toml).
     #
     # Matrix: 3.13 is the version the project is developed against locally, and 3.12 is
-    # the oldest interpreter the suite currently passes on. 3.10 is NOT in the matrix and
-    # must not be added without fixing it first -- see the note below.
+    # the oldest interpreter the suite currently passes on. 3.10 is NOT in this matrix
+    # and must not be added without fixing it first: the library supports 3.10 (see
+    # requires-python), but the suite does not collect there. The guard step below
+    # exists to turn that into a clear message rather than a collection error, and it
+    # only works because it runs after actions/setup-python.
     strategy:
       fail-fast: false
       matrix:
@@ -31,26 +34,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Reject an unsupported Python early
-        # requires-python is >=3.10, but the suite does not actually collect on 3.10:
-        # tests/test_packaging.py imports tomllib (3.11+), and IntFlag.name for a
-        # multi-bit flag is None on 3.10, which fails test_effects.py. Rather than let
-        # the matrix fail with a confusing collection error, say so here.
-        run: |
-          python - <<'PY'
-          import sys
-          if sys.version_info < (3, 11):
-              raise SystemExit(
-                  f"sparkscreen's test suite requires Python >= 3.11 (running "
-                  f"{sys.version_info.major}.{sys.version_info.minor}). "
-                  "pyproject.toml declares >=3.10, which is currently untrue -- "
-                  "see the CI notes in CONTRIBUTING.md."
-              )
-          PY
-
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -59,6 +45,28 @@ jobs:
           # dependency path, setup-python cannot build a cache key and falls back to
           # hashing every requirements.txt it can find -- of which there are none.
           cache-dependency-path: pyproject.toml
+
+      - name: Reject an unsupported Python
+        # MUST run after actions/setup-python above, or `python` here is the
+        # ubuntu-latest image default rather than matrix.python-version, and the
+        # guard silently inspects the wrong interpreter.
+        #
+        # requires-python is >=3.10 and the runtime source really is 3.10-clean, so
+        # the library supports 3.10. The *test suite* does not collect on it:
+        # tests/test_packaging.py imports tomllib (3.11+), and IntFlag.name for a
+        # multi-bit flag is None on 3.10, which fails test_effects.py. Rather than
+        # let the matrix fail with a confusing collection error, say so here.
+        run: |
+          python - <<'PY'
+          import sys
+          if sys.version_info < (3, 11):
+              raise SystemExit(
+                  f"sparkscreen's test suite requires Python >= 3.11 (running "
+                  f"{sys.version_info.major}.{sys.version_info.minor}). The library "
+                  "itself supports 3.10 -- see requires-python in pyproject.toml -- "
+                  "so this is a suite limitation, not a packaging one."
+              )
+          PY
 
       - name: Install
         run: |
@@ -94,9 +102,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
           cache: pip
@@ -195,15 +203,15 @@ jobs:
     # machine with a local JVM. Cold CI plus JVM download needs real headroom.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4 (deprecated upstream; see below)
         with:
           distribution: temurin
           java-version: "17"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
           cache: pip
@@ -238,9 +246,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
           cache: pip
@@ -272,14 +280,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4 (deprecated upstream; see below)
         with:
           distribution: temurin
           java-version: "17"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
           cache: pip
@@ -294,7 +302,7 @@ jobs:
         # The jar is a gitignored build input (see .gitignore: src/sparkscreen/grammar/.cache/).
         # It is downloaded on demand by sparkscreen.grammar.spec._antlr_jar. Caching it
         # keyed on the ANTLR version keeps this job from re-downloading ~2 MB every run.
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: src/sparkscreen/grammar/.cache
           key: antlr-4.13.1-${{ runner.os }}
@@ -322,19 +330,33 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: pyproject.toml
-      - run: python -m pip install --upgrade pip && python -m build --wheel
+      - name: Install the build frontend
+        # `build` is a separate distribution from the project and from its own
+        # build-system requirements. `python -m build --wheel` fails with
+        # "No module named build" without it, and the failure is on every matrix
+        # leg -- which would take the publish step below down with it, since that
+        # step lives in this job.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+
+      - name: Build the wheel
+        # Builds from the checkout, so the project's own dependencies are not
+        # installed and not needed: `build` provisions the build backend from
+        # [build-system].requires in an isolated env.
+        run: python -m build --wheel --outdir dist
 
       # Publishing is release-only and needs an identity token, not an API password.
-      # Pinned to a release tag, not the moving release/v1 branch: a publish step is
-      # the last place to accept a tag that can change under you between review and
-      # release.
-      - uses: pypa/gh-action-pypi-publish@v1.14.2
+      # Pinned to a full commit SHA, not the moving release/v1 branch and not the
+      # v1.14.2 tag either: a tag can be moved by a maintainer after review, which
+      # is the same risk this pin exists to remove. Bump by hand and re-review.
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
