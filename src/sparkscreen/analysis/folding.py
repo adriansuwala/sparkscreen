@@ -55,6 +55,12 @@ Known gaps, recorded rather than papered over:
     pair, a decorator, a closure, a generator, `*args`/`**kwargs` at either end, and
     any second-level call (`f(g("x"))`) are all UNKNOWN -- the argument value is not
     provable from what is visible here.
+  * A branch merge resolves a name only when *every* arm agrees on it. `if c: w =
+    df.write` with no `else` does not resolve `w`, because on the untaken path the name
+    is unbound and the use after the `if` would raise; this is the fail-closed reading
+    and it is deliberate, not an oversight. Only `if` merges this way -- a `while` body
+    may run any number of times including zero, and a `try` body may be abandoned
+    partway, so neither admits the same argument and both still leak.
   * Unrolling is all-or-nothing. A loop over more than `MAX_LOOP_UNROLL` elements,
     or one that pushes the module past `MAX_UNROLL_TOTAL`, is visited exactly once
     and reports UNKNOWN for the whole loop -- truncating would report a prefix of the
@@ -773,8 +779,95 @@ class StringFolder(ast.NodeVisitor):
 
     def visit_If(self, node: ast.If) -> None:
         self.visit(node.test)
-        self._block(node.body)
-        self._block(node.orelse)
+        self._branch(node.body, node.orelse)
+
+    def _branch(self, body: list[ast.stmt], orelse: list[ast.stmt]) -> None:
+        """Walk two mutually exclusive arms and *join* the bindings they agree on.
+
+        Every other block form leaks: `_block` invalidates every name its body writes,
+        because a body that may not run leaves the enclosing name's value unknown. An
+        `if` is the one construct where we can say better than "unknown", because
+        exactly one of two arms runs and both are visible right here. So instead of
+        discarding the arms' bindings we intersect them: a name both arms bind to the
+        same value and type holds that value whichever arm ran, and that is a value we
+        can prove.
+
+        This is the statement-level counterpart of the `ast.IfExp` rule in `_value`
+        ("only safe when both branches agree, value *and* type"). Without it,
+        `if flag: w = df.write / else: w = df.write / w.save(p)` loses both bindings at
+        the merge and the write is not reported at all -- a false ALLOW on the one
+        shape the whole module exists to catch.
+
+        Refused, and left unresolved as before, when: the arms disagree; only one arm
+        binds the name and the other never had it; an arm invalidated the name. An
+        arm that does not mention the name inherits whatever the enclosing scope held
+        before the `if`, which is sound because that is exactly what it does at
+        runtime -- so `w = df.write; if c: w = df.write; w.save(p)` still resolves,
+        while `if c: w = df.write; w.save(p)` alone does not, since the untaken path
+        leaves `w` unbound and the call would raise.
+
+        The two guards below are defence in depth and are *not* reachable through any
+        source that exists today, which is recorded here rather than left for the next
+        reader to assume otherwise. `_bind` already refuses to bind a `global` name of
+        the current body, and it discards a name from `poisoned` whenever it binds one,
+        so neither a `global` nor a poisoned-but-still-present name can reach the merge.
+        They are kept because they cost one comparison and they close the failure in the
+        fail-closed direction if either invariant in `_bind` is ever loosened -- a merge
+        that wrote the module's name, or resurrected a value its own scope had
+        invalidated, would both be silent stale bindings, which is the one outcome this
+        module treats as worse than no finding.
+        """
+        parent = self._frame()
+        arms: list[_Frame] = []
+        for statements in (body, orelse):
+            self._push(_Frame(parent))
+            try:
+                for stmt in statements:
+                    self.visit(stmt)
+            finally:
+                arms.append(self._pop())
+        for name in sorted({n for arm in arms for n in (*arm.table, *arm.poisoned)}):
+            agreed = self._agreed_value(parent, name, arms)
+            if agreed is MISSING:
+                self._invalidate_name(name, parent)
+            elif name in parent.globals and parent is not self._frames[0]:
+                # Unreachable while `_bind` refuses `global` names; see the docstring.
+                self._frames[0].table.pop(name, None)
+                parent.poisoned.add(name)
+            else:
+                parent.table[name] = agreed
+                parent.poisoned.discard(name)
+
+    def _agreed_value(
+        self, parent: _Frame, name: str, arms: Sequence[_Frame]
+    ) -> object:
+        """The value every arm leaves `name` holding, or MISSING.
+
+        An arm that never mentions `name` inherits the enclosing scope's value, which
+        is what it does at runtime. Anything else -- a disagreement, an invalidation, a
+        name that was unbound before the `if` and is bound on only one path -- has no
+        single answer, and MISSING is that answer. MISSING never becomes "safe"
+        downstream; it flows into the UNKNOWN verdict.
+        """
+        values: list[object] = []
+        for arm in arms:
+            if name in arm.table:
+                values.append(arm.table[name])
+            elif name in arm.poisoned:
+                return MISSING
+            elif name in parent.table and name not in parent.poisoned:
+                values.append(parent.table[name])
+            else:
+                # Untouched here, and nothing to inherit: on the path where this arm
+                # ran the name is simply not bound.
+                return MISSING
+        first = values[0]
+        # Type as well as value: `1` and `True` compare equal but render differently
+        # in SQL text, which is the same rule `IfExp` and `_agreed_parameters` apply.
+        for other in values[1:]:
+            if type(other) is not type(first) or other != first:
+                return MISSING
+        return first
 
     def visit_While(self, node: ast.While) -> None:
         self.visit(node.test)
