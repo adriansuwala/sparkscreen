@@ -623,10 +623,12 @@ class TestLabelUniverseContainsOnlyStatementLabels:
         none of those maps to a context class that exists in `SqlBaseParser`, so the
         `classes.get(...)` lookup drops them either way. See `SURVIVORS_NOT_COVERED`.
 
-        The ledger nonetheless lists `x__child_rule_contexts__mutmut_3` as killed by
-        this class, and it is -- the `or` -> `and` mutation leaves the `_NOT_RULES`
-        clause intact, so the private-name filter still has a working half. The test
-        that proves it is the `startswith("_")` leak assertion below.
+        This mutant is deliberately NOT killed: it is in `EXPECT_SURVIVE` in
+        scripts/verify_survivor_claims.py and in `SURVIVORS_NOT_COVERED` below. The
+        reason the whole class still matters is the `startswith("_")` leak assertion --
+        that pins the property the mutation happens not to disturb, so if a future
+        grammar change makes `_NOT_RULES` names resolve to real context classes, the
+        mutant starts dying and the recorded justification is what flags it as stale.
         """
         labels = labels_for_grammar(spec_key)
         assert labels

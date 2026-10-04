@@ -42,7 +42,7 @@ question *in* this table — is what made it drift in the first place.
 
 ## Where we are
 
-`master` is green: **2,929 tests passing in ~22s**, 17 skipped, 8 xfailed (all documented
+`master` is green: **3,146 tests passing in ~23s**, 19 skipped, 8 xfailed (all documented
 gaps, none accidental). **51 differential expectations re-verified against a live Spark
 3.5.1** — 40 SQL plus 11 DataFrame, the latter asserting row counts actually drop on
 overwrite. Wheel ships the parsers and runs with no JVM. A 20-statement file screens in
