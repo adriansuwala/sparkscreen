@@ -167,9 +167,9 @@ Two judgement calls, both deliberate:
 - An *unresolved* alias stays silent, including for `save`/`jdbc`. Turning every unresolved
   writer into a REVIEW would bury ordinary agent code in findings.
 
-Remaining gap: a writer bound inside an `if` body loses its binding at the branch merge, so
-the two-arm form still reports ALLOW for `save`/`jdbc`. Recorded as
-[F16](findings.md#f16--a-writer-bound-in-both-arms-of-an-if-loses-its-binding-savejdbc-report-allow).
+Remaining gap: a writer bound inside an `if` body loses its binding at the branch merge.
+That gap is now **closed** — [F16](findings.md#f16--a-writer-bound-in-both-arms-of-an-if-loses-its-binding-savejdbc-report-allow)
+was fixed in `337b91b`; two arms that agree resolve, two that disagree do not.
 
 ## Interprocedural folding — DONE (`e8e27d9`)
 

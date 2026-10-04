@@ -330,7 +330,8 @@ Measured, not guessed. All of these currently return ALLOW with zero findings:
 
 | input | why it is missed |
 |---|---|
-| `w = df.write` then `w.save("/data")` | the folder tracks string constants, not object bindings; `saveAsTable`/`insertInto` are unaffected because they match on callee name |
+| `w = df.write` then `w.save("/data")` | **no longer missed** — resolved since T5b and the branch-merge fix (F16); `review`. Kept here as a worked example of a row that went stale; see the note below the table |
+| `if flag: w = df.write` then `w.save(...)` (single arm) | the write may not execute, so an unbound receiver is not treated as a sink — deliberate, see [F16](findings.md#f16--a-writer-bound-in-both-arms-of-an-if-loses-its-binding-savejdbc-report-allow) |
 | `dbutils.fs.rm("/", recurse=True)` | Python-level, deliberately out of scope |
 | `shutil.rmtree("/data")` | Python-level, out of scope |
 | `os.system("rm -rf /")` | Python-level, out of scope |
@@ -388,12 +389,16 @@ still unknown until someone reads what the tool says about hangs.
 
 ## F16 — a writer bound in both arms of an `if` loses its binding; `save`/`jdbc` report ALLOW
 
-Found while verifying T5b with a probe that deliberately did not go through the code under
-test. Still open: the branch merge in `folding.py` discards a binding established inside a
-branch body, and interprocedural folding did not change that (it adds resolution, not
-merge semantics).
+**Status: FIXED.** `337b91b`, merged into `master` as `6783b0e`, covered by
+`tests/test_branch_merge.py`. The reproducer below now reports `REVIEW`. Found while
+verifying T5b with a probe that deliberately did not go through the code under test.
 
-## Reproducer
+The rest of this section is kept as it was written, because the "expected fix" is what
+the code ended up doing and it is worth seeing that the shape was right before it was
+implemented. The tables that report `allow` are historical measurements of the defect,
+not current behaviour.
+
+## Reproducer (as it behaved when found)
 
     if flag:
         w = df.write
@@ -401,18 +406,20 @@ merge semantics).
         w = df.write
     w.save("/tmp/x")
 
-reports `ALLOW` with zero findings. `w.save("/tmp/x")` writes to the local filesystem.
-`w.jdbc(url, "t")` likewise reports `ALLOW` and reaches an external system.
+reported `ALLOW` with zero findings. `w.save("/tmp/x")` writes to the local filesystem.
+`w.jdbc(url, "t")` likewise reported `ALLOW` and reached an external system.
+
+Now: `REVIEW` on both, with the resolved target in the finding.
 
 ## Before and after T5b, measured
 
 | input | master | with T5b |
 |---|---|---|
 | `w = df.write; w.save("/tmp/x")` | `allow` | `review` |
-| two-arm `if`/`else`, then `w.save(...)` | `allow` | **`allow`** |
-| two-arm `if`/`else`, then `w.jdbc(...)` | `allow` | **`allow`** |
+| two-arm `if`/`else`, then `w.save(...)` | `allow` | **`allow`** — now `review` |
+| two-arm `if`/`else`, then `w.jdbc(...)` | `allow` | **`allow`** — now `review` |
 
-So T5b closes the straight-line case and leaves the branch case open. The remaining gap is
+So T5b closed the straight-line case and left the branch case open. The remaining gap was
 a branch-merge limitation in the folder, not an alias-resolution one.
 
 ## Why it is narrow
@@ -424,8 +431,8 @@ Only the operations that *require* a resolved binding are affected:
 | `w.saveAsTable("prod.t")` | `review` | matched on method name; the receiver is not consulted |
 | `w.insertInto("prod.t", ...)` | `review` | same |
 | `w.mode("overwrite").saveAsTable(...)` | `deny` | `denies_regardless_of_namespace` fires on the effect |
-| `w.save("/tmp/x")` | **`allow`** | needs a resolved writer — the binding is lost at the merge |
-| `w.jdbc(url, "t")` | **`allow`** | same |
+| `w.save("/tmp/x")` | was **`allow`** | needs a resolved writer — the binding was lost at the merge. Now `review` |
+| `w.jdbc(url, "t")` | was **`allow`** | same. Now `review` |
 
 The destructive table operations are still caught, by name-matching and effect policy, even
 when alias resolution fails. The exposure is the two operations with no PySpark-specific
@@ -444,7 +451,12 @@ binding established inside a branch body. Single-arm binding fails the same way:
 which is defensible on its own (the write may not execute), but it is indistinguishable
 from the two-arm case, which *should* resolve. That is the bug: the two are merged.
 
-## Expected fix
+The precise mechanism, found during the fix: `visit_If` routed both arms through
+`_block(leak=True)`, which invalidates every name a block writes on the grounds that the
+block may not run. That is right for a loop or a `with`, and wrong for an `if`, where
+exactly one of two *visible* arms runs and they can be intersected.
+
+## Expected fix — implemented as described
 
 Make the merge join bindings rather than discard them. If both arms bind a name to the same
 provable value, that value survives; if the arms disagree, the result is unresolved. Never
@@ -456,6 +468,18 @@ Then add the reproducer as a regression test asserting both directions: arms agr
 The failure mode to avoid is fixing this by reporting `UNKNOWN` for every unresolved writer.
 T5b deliberately leaves an unresolved alias silent so ordinary agent code does not drown in
 findings. The fix belongs in the merge, not in the reporting.
+
+`tests/test_branch_merge.py` pins both directions, plus the cases a too-eager fix would
+break: a merge followed by a real rebinding (the rebinding wins), a sink *inside* each arm
+(still found separately), and a merged binding whose `mode`/`destination` must be read
+through the merge rather than assumed.
+
+One measured deviation from the expectation above: the disagreeing case reports `review`,
+not `unknown`. That is the T5b silence rule applied consistently — `save` and `jdbc` are
+common method names in ordinary Python, so an unresolvable receiver stays silent rather
+than crying wolf. The direction that matters is pinned by the tests: a disagreement never
+produces a verdict *better* than an unresolvable name already gets, so it cannot become a
+false ALLOW.
 
 Related: interprocedural folding resolves a function from the call sites *visible in the
 file*. A function resolved here and also called from another module with a different
@@ -807,3 +831,42 @@ really screened with `spark-3.5.1`, and that is now asserted rather than assumed
 
 Every engine this project supports has therefore been run against it, and the CI matrix is
 reproducing locally on all three legs before its first run.
+---
+
+## F23 — the documentation outlived the fixes, three times over
+
+Found 2026-10-04 while answering "what is next?". No code defect: every claim below was
+wrong only in the documents, and the code was right in all three cases.
+
+| document | claimed | measured |
+|---|---|---|
+| `findings.md` F16 | "Still open"; `save`/`jdbc` report `allow` | fixed in `337b91b`; reports `review` |
+| `roadmap.md` "Where we are" | 3,146 tests, 51 differential expectations, two grammars | 3,833 with a JVM (3,806 without), 90 collected / 87 passed / 3 skipped, three grammars |
+| `findings.md` blind-spot table | `w = df.write` then `w.save(...)` is missed | `review`, since T5b and the F16 fix |
+
+The F16 row is the sharp one, because **F16's own section contains the lesson that would
+have caught it**: "Measure the gap list; do not curate it... Re-derive the list from a probe
+rather than maintaining it by hand, which is the same argument as the enum one: a stale
+capability claim reads as a current one." That paragraph is about the blind-spot table. It
+is equally true of the status line three sections above it in the same file.
+
+**Why this is not the first time.** The blind-spot table itself was stale once already —
+F16 records the three DataFrame write rows surviving a full commit after they were fixed.
+So the shape has now recurred at three levels: a table row, a finding's status line, and a
+whole document's summary block.
+
+**The generalisation, which is the actual finding.** The repository has a working oracle
+for code behaviour and none for prose. `_verify_refs.py` catches a stale *identifier*; the
+audits catch claims they were written to catch. But "still open" versus "fixed", and a test
+count, are the kind of claim that is true when written, false the moment a fix lands, and
+invisible to every check in `ci_checks.py` — because no assertion anywhere compares a
+document's status word to the branch history.
+
+Worth noting what the CI checks *do* cover: all five documentation audits pass, including
+the pin-identity guard, on a tree where three documents were this wrong. A green audit
+means the claims someone remembered to encode are true. It says nothing about the ones
+nobody encoded.
+
+The cheapest real guard is a `br close` reason that names the commit, checked against
+`git log` — the ledger already links findings to code, so the stale claim is detectable by
+comparing a finding's status against the branches containing it. Not built here.

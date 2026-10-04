@@ -47,6 +47,25 @@ HISTORICAL_FILES = {
     "docs/threads.md",
 }
 
+#: Files that *define* the rule and therefore have to name the shapes they reject.
+#:
+#: This audit flagged itself on its own docstring: explaining that `spark-4.0` is retired
+#: requires writing the literal, and per-line narration matching does not rescue it because
+#: the words "removed"/"retired" sit on a neighbouring line from the literal. That is the
+#: same trap AGENTS.md hit when it documented this very bug.
+#:
+#: Rewording was rejected because two of these lines exist precisely to show what a real
+#: key and a real *release* look like side by side (`spark-4.1` vs `spark-4.1.3`); removing
+#: the literals would gut the explanation of why the regex is loose on the patch level.
+#:
+#: Narrow on purpose and audited like the rest: hits here are printed by name below, so
+#: widening this set is visible in the output rather than silent. A literal that is stale
+#: for a *different* reason still fails -- the exemption is for naming the shape, not for
+#: any grammar key whatsoever.
+RULE_FILES = {
+    "_verify_refs.py",
+}
+
 #: Never scanned: build output, gitignored caches, and mutation-instrumented copies.
 SKIP_DIRS = {"build", "dist", ".git", ".venv", ".venv-pyspark", "mutants", "__pycache__",
              "src/sparkscreen/grammar/generated"}
@@ -134,17 +153,23 @@ stale_keys: list[tuple[str, int, str, str]] = []
 stale_pins: list[tuple[str, int, str]] = []
 exempt_fixtures: list[tuple[str, int, str]] = []
 exempt_prose: list[tuple[str, int, str]] = []
+exempt_rule: list[tuple[str, int, str]] = []
 
 for path in scannable_files():
     rel = str(path.relative_to(ROOT))
     text = path.read_text(errors="replace")
     is_test = rel.startswith("tests/")
+    is_rule = rel in RULE_FILES
     for lineno, line in enumerate(text.splitlines(), 1):
         for m in GRAMMAR_KEY_RE.finditer(line):
             key = m.group(0)
             if key in KEYS:
                 continue
-            if is_test and REJECTION_ASSERTION.search(text):
+            if is_rule:
+                # Naming the rejected shape is the job of a RULE_FILE. Recorded by name
+                # below rather than dropped, so this exemption is inspectable.
+                exempt_rule.append((rel, lineno, key))
+            elif is_test and REJECTION_ASSERTION.search(text):
                 exempt_fixtures.append((rel, lineno, key))
             elif RETIREMENT_NARRATION.search(line) and not EXECUTABLE_SHAPE.search(line):
                 exempt_prose.append((rel, lineno, key))
@@ -165,6 +190,10 @@ for rel, lineno, ver in stale_pins:
     print(f"       {rel}:{lineno}  pyspark=={ver}")
 
 print("\n--- what was exempt, and why (shown so the allowlist stays auditable) ---")
+if exempt_rule:
+    print(f"  {len(exempt_rule)} literal(s) inside the file(s) that define this rule:")
+    for rel, lineno, key in exempt_rule:
+        print(f"    {rel}:{lineno}  {key}")
 print(f"  {len(exempt_fixtures)} test fixture(s) naming a key to assert it is rejected:")
 for rel, lineno, key in exempt_fixtures:
     print(f"    {rel}:{lineno}  {key}")
