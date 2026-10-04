@@ -149,3 +149,36 @@ find yourself deleting or weakening one, stop.
 Screening Spark SQL and Spark DataFrame writes. **Not** general Python
 (`os.system`, `shutil.rmtree`, `dbutils` are out of scope *by decision* — see
 `sparkscreen-znf`). Not Rust; 12 ms against a multi-second job is not a bottleneck.
+
+## Running the CI checks locally
+
+Every check CI performs is runnable here, and CI calls the same code path -- there is no
+second implementation to drift out of sync.
+
+```bash
+scripts/ci_checks.py --list          # what is available
+scripts/ci_checks.py --all           # everything satisfiable in this checkout
+scripts/ci_checks.py audits fast     # named checks
+scripts/ci_checks.py differential --engine 4.1.3 --interpreter /path/to/venv/bin/python
+```
+
+`--all` runs the checks that need nothing external and skips the rest. The differential
+check needs a venv with a pinned pyspark; it verifies the interpreter actually has the
+engine you named, because a mismatched `--engine` would otherwise compare one engine
+against another's expectations.
+
+The checks map onto CI jobs:
+
+| check | CI job | needs |
+|---|---|---|
+| `no-pyspark` | fast | nothing |
+| `fast` | fast | nothing |
+| `wheel-contents` | wheel | `build` |
+| `wheel-install` | wheel | `build` |
+| `differential` | differential | a JVM and a pinned pyspark |
+| `audits` | docs | nothing |
+| `grammar-clean` | grammar-build | a JVM |
+
+`grammar-clean` regenerates the parsers from the pinned grammars and fails on any diff. It
+is the check that keeps a pin edit from leaving the committed generated code disagreeing
+with the grammar it came from, and it needs a JVM -- set `JAVA_HOME` or have `java` on PATH.

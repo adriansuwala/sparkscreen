@@ -73,27 +73,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Prove pyspark is absent
-        # This is the property the fast suite depends on, and it is cheap to state
-        # explicitly rather than assume. If a future edit adds pyspark to `dev`, this
-        # fails loudly instead of quietly turning the fast suite into a slow one.
-        run: |
-          if python -c "import pyspark" 2>/dev/null; then
-            echo "::error::pyspark is installed in the fast environment; it belongs only in the differential environment"
-            exit 1
-          fi
-          echo "pyspark correctly absent from the fast environment"
+      - name: Prove the fast environment has no engine
+        run: python scripts/ci_checks.py no-pyspark
 
       - name: Fast test suite
-        # No `-q`: pyproject's addopts already sets it, and a second -q suppresses the
-        # "N passed" summary line that is the whole point of reading CI output.
-        #
-        # The whole tests/ tree is run. tests/differential is NOT deselected: it is
-        # already inert here, because both differential modules call
-        # pytest.importorskip("pyspark") at import time and skip cleanly. Passing
-        # --deselect tests/differential would be a no-op that reads as if it excluded
-        # something.
-        run: python -m pytest tests/
+        # The whole tests/ tree, and tests/differential is NOT deselected: it is already
+        # inert here because its modules call pytest.importorskip("pyspark") at import
+        # and skip cleanly. Deselecting would be a no-op that reads as if it excluded
+        # something. scripts/ci_checks.py runs the identical invocation, so a local run is
+        # evidence about this job rather than a similar-looking test.
+        run: python scripts/ci_checks.py fast
 
   wheel:
     # The generated ANTLR parsers are committed and ship in the wheel, so the artefact
@@ -119,71 +108,10 @@ jobs:
         run: python -m build --wheel --outdir dist
 
       - name: Assert no grammar sources or ANTLR jar shipped
-        # The .g4 files are maintainer inputs and the jar is a multi-megabyte build
-        # tool; neither is on the runtime path. Shipping them makes the wheel far
-        # larger and invites the wrong inference (editing a .g4 in site-packages
-        # changes nothing, because nothing regenerates from it).
-        run: |
-          python - <<'PY'
-          import glob, sys, zipfile
+        run: python scripts/ci_checks.py wheel-contents
 
-          wheels = glob.glob("dist/*.whl")
-          assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
-          names = zipfile.ZipFile(wheels[0]).namelist()
-
-          g4 = [n for n in names if n.endswith(".g4")]
-          jar = [n for n in names if n.endswith(".jar")]
-          assert not g4, f"grammar sources leaked into the wheel: {g4}"
-          assert not jar, f"ANTLR jar leaked into the wheel: {jar}"
-
-          # The other half of the same contract: if the generated parsers were missing,
-          # "no JVM needed" would be true only because nothing could parse anything.
-          for spec in ("spark_3_5_1", "spark_4_1", "spark_4_2"):
-              for mod in ("SqlBaseLexer.py", "SqlBaseParser.py"):
-                  path = f"sparkscreen/grammar/generated/{spec}/{mod}"
-                  assert path in names, f"{path} missing from the wheel"
-
-          print(f"wheel contents ok: {len(names)} entries, no .g4, no .jar, all three parsers present")
-          PY
-
-      - name: Install the wheel into a clean environment
-        run: |
-          python -m venv /tmp/wheel-venv
-          /tmp/wheel-venv/bin/python -m pip install --upgrade pip
-          /tmp/wheel-venv/bin/python -m pip install dist/*.whl
-
-      - name: Screen with no JVM available
-        # PATH is reduced to an empty directory on purpose. GitHub's ubuntu runners
-        # preinstall a JDK at /usr/bin/java, so a probe that keeps the default PATH --
-        # or the usual /usr/bin:/bin -- would find that java and prove nothing. With an
-        # empty PATH, `shutil.which('java')` cannot succeed, so the run below genuinely
-        # exercises the no-JVM path rather than assuming it.
-        #
-        # env is stripped too (no JAVA_HOME, no JRE_HOME), and the install is a real
-        # wheel install rather than an editable one, so `src/` is not on the path.
-        run: |
-          mkdir -p /tmp/empty-bin
-          env -i PATH=/tmp/empty-bin HOME=/tmp /tmp/wheel-venv/bin/python - <<'PY'
-          import shutil
-
-          assert shutil.which("java") is None, "java is reachable; this proves nothing"
-          assert shutil.which("javac") is None, "javac is reachable; this proves nothing"
-
-          import sparkscreen
-          from sparkscreen import screen
-
-          assert screen('spark.sql("DROP TABLE prod.t")').verdict.value == "deny"
-          assert screen('spark.sql("delete from t where id=1")').verdict.value == "review"
-          assert screen('df.write.mode("overwrite").saveAsTable("prod.t")').verdict.value == "deny"
-
-          # Prove the committed parser actually loaded and parsed, rather than the
-          # verdict happening to come from somewhere else.
-          from sparkscreen.grammar.parser import get_parser
-          for key in ("spark-4.2", "spark-4.1", "spark-3.5.1"):
-              assert get_parser(key).parse("select 1"), key
-
-          print("wheel ok with no JVM:", sparkscreen.__version__)
-          PY
+      - name: Install the wheel into a clean environment and screen with no JVM
+        run: python scripts/ci_checks.py wheel-install
 
       - name: Packaging invariants from the test suite
         # tests/test_packaging.py already asserts the version agreement and the wheel
@@ -250,29 +178,11 @@ jobs:
           echo "JAVA_HOME=$JAVA_HOME"
 
       - name: Differential suite against Spark ${{ matrix.pyspark-version }}
-        # No PYTHONPATH needed: pyproject sets pythonpath = ["src"] for pytest, and
-        # tests/differential inserts its own paths at import time. Verified locally.
-        run: python -m pytest tests/differential/ -v
-
-      - name: Prove the suite actually ran
-        # The differential modules gate on `importorskip("pyspark")`, so a job whose
-        # engine failed to install, or whose JVM is wrong, reports SUCCESS having executed
-        # nothing -- three green jobs, zero checks. pytest exits 0 on an all-skipped run,
-        # so the suite step above cannot catch it.
-        #
-        # `pytest --collect-only -q` prints one `file: count` line per collected module
-        # and nothing at all when every module skips at import. Measured, not assumed:
-        # with a real engine it prints 40/11/13/26 = 90; with no engine it prints
-        # nothing and exits 0. Counting those lines is therefore the check.
-        run: |
-          python -m pytest tests/differential/ -p no:cacheprovider --collect-only -q             | tee /tmp/collected.txt
-          count=$(awk -F': ' '/^tests[/\]differential[/\].*\.py: [0-9]+$/ { n += $2 } END { print n+0 }' /tmp/collected.txt)
-          echo "engine tests collected: $count"
-          if [ "$count" -lt 90 ]; then
-            echo "::error::differential suite collected only $count engine tests (expected 90). The engine did not load, so this job checked nothing."
-            exit 1
-          fi
-          echo "differential suite collected $count engine tests for Spark ${{ matrix.pyspark-version }}"
+        # Carries the collect-count assertion with it. The differential modules gate on
+        # `importorskip("pyspark")`, so an engine that failed to load makes pytest exit 0
+        # having executed nothing, and three green jobs would have checked nothing. The
+        # exit code cannot distinguish that from success, so the count is checked instead.
+        run: python scripts/ci_checks.py differential --engine ${{ matrix.pyspark-version }}
 
   docs:
     # The four documentation audits. These are standalone scripts, NOT pytest tests, so
@@ -295,12 +205,9 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Documentation audits
-        # Run as four separate steps, not a loop: a failure names the audit that broke
-        # in the job log without needing to be read back out of a combined exit code.
-        run: python _verify_docs.py
-      - run: python _verify_effect.py
-      - run: python _verify_agents.py
-      - run: python _verify_readme.py
+        # Four separate steps, not a loop: a failure names the audit that broke in the job
+        # log without needing to be read back out of a combined exit code.
+        run: python scripts/ci_checks.py audits
 
   grammar-build:
     # Regenerating the parsers is a maintainer operation: the generated parsers are
