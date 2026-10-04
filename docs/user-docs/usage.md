@@ -78,7 +78,7 @@ DENY: 1 deny, 0 unknown, 0 review, 0 allow
 ```python
 from sparkscreen import screen, load_policy, read_only_policy, Verdict
 
-report = screen(source_code, policy=None, spec="spark-4.0")
+report = screen(source_code, policy=None, spec="spark-4.2")
 
 report.ok         # True only when verdict is ALLOW with no unknowns
 report.verdict    # Verdict.ALLOW / DENY / REVIEW / UNKNOWN

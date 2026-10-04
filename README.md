@@ -164,10 +164,15 @@ a Spark job takes seconds — which is why this is Python, not Rust.
 ## Development
 
 ```bash
-./scripts/setup.sh          # fast env, ~15s, no JVM
-./scripts/setup.sh --full   # + differential env (PySpark 3.5.1) and a discovered JVM
-./scripts/setup.sh --check  # verify an existing env, change nothing
+./scripts/setup.sh              # fast env, ~15s, no JVM
+./scripts/setup.sh --full       # + differential env (PySpark 3.5.1) and a discovered JVM
+./scripts/setup.sh --check      # verify an existing env, change nothing
+./scripts/setup.sh --engine 4.1.3   # + a second engine, in .venv-pyspark-4.1.3
 ```
+
+Three Spark lines ship grammars and the CI matrix tests all three. `--full` provisions the
+oldest by default because it is the cheapest useful one; `--engine` provisions any other.
+Each engine venv is ~500MB (462MB of it Spark's own jars), so ask for the ones you need.
 
 Two environments on purpose. The fast one has **no PySpark**, which is what keeps
 ~2,500 tests at 45 seconds; the differential one has PySpark 3.5.1 and needs a JVM.

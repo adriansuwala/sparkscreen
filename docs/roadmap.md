@@ -42,23 +42,26 @@ question *in* this table — is what made it drift in the first place.
 
 ## Where we are
 
-`master` is green: **3,146 tests passing in ~23s**, 19 skipped, 8 xfailed (all documented
-gaps, none accidental). **51 differential expectations re-verified against a live Spark
-3.5.1** — 40 SQL plus 11 DataFrame, the latter asserting row counts actually drop on
-overwrite. Wheel ships the parsers and runs with no JVM. A 20-statement file screens in
-**~12 ms** warm (median 11.9 ms measured by `scripts/bench.py`).
+`master` is green: **3,833 tests passing in ~49s** with a JVM (3,806 without — the extra
+27 are the pin-identity guard, which generates parsers), 20 skipped, 10 xfailed (all
+documented gaps, none accidental). **90 differential tests collect against a live Spark
+3.5.1** — 87 pass, 3 skip — across four differential modules; 18 engine-specific
+expectations (6 per engine) are recorded for 3.5.1, 4.1.3 and 4.2.0, all three verified
+against live engines. The wheel ships the parsers and runs with no JVM. A 20-statement
+file screens in **11.8 ms** warm (median, measured by `scripts/bench.py`).
 
 Detected today, and only this:
 
 - `spark.sql(...)` sinks, positional and keyword forms
 - SQL recovered by constant folding through f-strings, `+`, `%`, `.format()`, `join()`,
   format specs — with real Python scoping, so shadowing and rebinding fail closed
-- Parsed with Spark's genuine grammar, two pinned versions, strict
+- Parsed with Spark's genuine grammar, three pinned versions, strict
 - Statement labels, table/namespace targets, string literals extracted from the parse tree
 - **DataFrame write sinks**: `saveAsTable`, `save`, `jdbc`, `insertInto`, with write
-  mode recovered (`overwrite` destroys, default errors out — both verified live)
-- **`Effect` flags per operation**: 122 mapped labels across both grammars, orthogonal
-  and fail-loud on an unmapped label
+  mode recovered (`overwrite` destroys, default errors out — both verified live), including
+  writers bound through an alias or through both arms of an `if`
+- **`Effect` flags per operation**: 122 mapped labels, orthogonal and fail-loud on an
+  unmapped label (the label universe derived across all three grammars is 112)
 - Declarative policy with namespace allowlists and resource limits
 - **Four verdicts** — `ALLOW` / `DENY` / `REVIEW` / `UNKNOWN` — so "we analysed it and a
   human should look" is distinguishable from "we could not analyse it"
@@ -77,9 +80,9 @@ The DataFrame API is the largest remaining gap and the reason the `Effect` axis 
 (The commit SHAs this file used to cite here do not resolve in this repository's history;
 cited by name instead, with the code and the test as the evidence.)
 
-Shipped. 122 labels mapped across both grammars, derived from the generated parser
-classes rather than a corpus, and `effects_for_label()` raises `UnmappedLabelError`
-rather than returning an empty set.
+Shipped. 122 labels mapped, derived from the generated parser classes rather than a
+corpus, and `effects_for_label()` raises `UnmappedLabelError` rather than returning an
+empty set.
 
 Separate *what an operation does* from *what the policy decided*, per
 [D4](decisions.md#d4--effect-is-a-set-of-flags-not-an-enum). Orthogonal flags, derived
@@ -94,8 +97,8 @@ Shipped, with the oracle converted into assertions. `tests/differential/
 test_dataframe_writes.py` runs against a live Spark 3.5.1 and checks that an overwrite
 takes a target from 3 rows to 2, that an append takes it to 4, and that default mode
 raises `TABLE_OR_VIEW_ALREADY_EXISTS` and changes nothing. Aliased writers
-(`w = df.write`) are covered; the branch-merge gap that remains is
-[F16](findings.md#f16--a-writer-bound-in-both-arms-of-an-if-loses-its-binding-savejdbc-report-allow).
+(`w = df.write`) are covered, including one bound in **both arms of an `if`**, which was
+the last fail-open here and is now closed — see [F16](findings.md#f16--a-writer-bound-in-both-arms-of-an-if-loses-its-binding-savejdbc-report-allow).
 
 `df.write.mode(...).saveAsTable(...)`, `.save(...)`, `.insertInto(...)`, `.jdbc(...)`,
 `.write.partitionBy(...).save(...)`.
@@ -121,14 +124,17 @@ already covers that. Python screening is a separate tool
 ([T4](threads.md#t4--pluggable-operation-cataloques),
 [T6](threads.md#t6--should-python-level-calls-be-screened-here)).
 
-### 4. Interprocedural constant propagation — ~4h
+### 4. ~~Interprocedural constant propagation~~ — done
 
-`def run(tbl): spark.sql(f"drop table {tbl}")` is UNKNOWN today even when every caller
-passes a literal. This is the cheap, high-value version of [T1](threads.md#t1--the-inverse-kernel-pseudo-executing-code-so-variation-resolves-itself)
-and needs no execution.
+Shipped in `e8e27d9`. `def run(tbl): spark.sql(f"drop table {tbl}")` is `DENY` when every
+call site in the file passes a literal and all of them agree, and `for t in ["a","b"]`
+unrolls to two sinks. No execution, no shim. This was the cheap, high-value version of
+[T1](threads.md#t1--the-inverse-kernel-pseudo-executing-code-so-variation-resolves-itself).
 
-Expect this to *increase* the UNKNOWN rate initially while making the remaining UNKNOWNs
-far more trustworthy.
+What is still unresolved is listed in
+[threads.md](threads.md#interprocedural-folding--done-e8e27d9): recursion, decorators,
+generators, methods, `*args`/`**kwargs`, non-literal defaults and disagreeing call sites.
+Resolution is per-file, which is the same trade T1 accepted.
 
 ---
 
@@ -187,19 +193,33 @@ is a real screener bug; a survivor in `screen.py` is the expensive kind, since t
 aggregation path which has already produced one production bug (F1).
 
 
-### Publishing — ~1h, no new code
+### Publishing — versioning and release scripts, no PyPI
 
-The wheel builds and is verified in a clean venv with `java` off `PATH`, carrying both
-grammar pairs. What is missing is the boring part: a `LICENSE`/author block check, a
-tagged release, and PyPI credentials — the version is already `0.8.0`, set in
-`pyproject.toml` and read from there by `src/sparkscreen/__init__.py`. This is
-the shortest path from "works on my machine" to "installable", and it is the only item
-here that is not blocked on a design question.
+**Decided 2026-10-04: not publishing to PyPI.** Installation is via a GitHub link, which
+is what the wheel was already verified to support — it builds, installs into a clean venv
+and runs with `java` off `PATH`, carrying the generated parsers.
+
+What that makes necessary, and what it does not:
+
+- **Still needed** — a tagged release (`git tag` + a release entry) and whatever scripting
+  makes a release repeatable: version bump, changelog, tag, and the CI checks that must
+  pass first. "Installable from a GitHub link" still requires a tag to point at, and the
+  version is currently only `0.8.0` in `pyproject.toml`.
+- **No longer needed** — PyPI credentials, a `.pypirc`, trusted publishing, and the
+  name-availability question.
+
+The version is the single source of truth in `pyproject.toml`, read from there by
+`src/sparkscreen/__init__.py`. A release script should read it rather than parse it twice,
+so there is one number.
+
+The shortest path from "works on my machine" to "installable", and the only item here that
+is not blocked on a design question.
 
 ## Explicitly not doing
 
-- **Rust.** [D11](decisions.md#d11--rust-is-not-the-answer-dropped). 8.1 ms of a 10.4 ms
-  budget, against a job that takes seconds. Revisit only if screening becomes a hot path.
+- **Rust.** [D11](decisions.md#d11--rust-is-not-the-answer-dropped). 11.8 ms for a
+  20-statement file, against a job that takes seconds. Revisit only if screening becomes a
+  hot path.
 - **A mocked runtime.** [T1](threads.md#t1--the-inverse-kernel-pseudo-executing-code-so-variation-resolves-itself).
   The static approximation is already good; interprocedural propagation captures most of
   the value for far less risk.
@@ -232,4 +252,7 @@ correct, 100%-passing corpus. Differential oracles are not a luxury here.
 Every seeded issue is closed, with its reasoning inline on the issue itself rather than
 only in this file — which is the point of having a tracker. Closed: `rn6` (DataFrame
 writes), `120` (`DELETE`/`MERGE` destruction), `r50` (`LOAD DATA`), `znf` (Python
-scope), `dhe` (verdict split). Run `br list` for current state.
+scope), `dhe` (verdict split).
+
+Open, as of 2026-10-04: `kie` (versioning and release scripts, no PyPI) and `sxl` (the
+real-snippet corpus — deliberately non-synthetic). Run `br list` for current state.

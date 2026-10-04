@@ -38,7 +38,7 @@ SUPPORTED_ENGINES = ("3.5.1", "4.1.3", "4.2.0")
 
 #: Graders that must be present on every PR.
 AUDIT_SCRIPTS = ("_verify_docs.py", "_verify_effect.py", "_verify_readme.py",
-                 "_verify_agents.py")
+                 "_verify_agents.py", "_verify_refs.py")
 
 
 class CheckFailure(Exception):
@@ -136,8 +136,14 @@ def check_fast_suite() -> str:
 def check_audits() -> str:
     """Every documented claim, re-derived by the script that owns it.
 
-    Four scripts, all of which assert things about the repo rather than about a
+    Five scripts, all of which assert things about the repo rather than about a
     fixture, so they are the only checks that catch prose drifting away from the code.
+
+    `_verify_refs.py` is the one that catches literals: a grammar key or engine pin
+    written into a file nothing executes. `setup.sh` shipped a verification step two
+    releases after F17 removed one key, and the user guide told readers to pass a retired
+    key in its headline example -- both invisible until a scan for grammar-key-shaped
+    literals rather than a list of known-bad strings.
     """
     for script in AUDIT_SCRIPTS:
         path = ROOT / script

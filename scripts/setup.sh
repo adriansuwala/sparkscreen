@@ -6,9 +6,15 @@
 # pre-existing JDK: the versions are declared in pyproject.toml, the JVM is discovered
 # rather than hardcoded, and every hard-to-guess path is echoed as it is chosen.
 #
-#   ./scripts/setup.sh              # fast dev env only (~15s, no JVM needed)
-#   ./scripts/setup.sh --full       # + differential env + Java + ANTLR (~2min, 500MB)
-#   ./scripts/setup.sh --check      # verify an existing env, change nothing
+#   ./scripts/setup.sh                    # fast dev env only (~15s, no JVM needed)
+#   ./scripts/setup.sh --full             # + differential env + Java + ANTLR (~2min, 500MB)
+#   ./scripts/setup.sh --check            # verify an existing env, change nothing
+#   ./scripts/setup.sh --engine 4.1.3     # + a second engine venv (.venv-pyspark-4.1.3)
+#
+# Three engines ship grammars, and the CI matrix runs all three. --full provisions the
+# oldest by default because it is the cheapest useful one; --engine provisions any other.
+# Each engine venv is ~500MB (462MB of which is Spark's own jars), so ask for the ones
+# you need rather than all of them.
 #
 # Safe to re-run: every step is idempotent.
 
@@ -23,20 +29,38 @@ MIN_PY="3.10"
 SPARK_VERSION="3.5.1"      # must match tests/differential expectations
 ANTLR_VERSION="4.13.1"     # both grammars are generated with this; see docs/agents.md
 
-FULL=0
-CHECK=0
-for arg in "$@"; do
-  case "$arg" in
-    --full)  FULL=1 ;;
-    --check) CHECK=1 ;;
-    -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "unknown option: $arg" >&2; exit 2 ;;
-  esac
-done
-
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m    %s\033[0m\n' "$*"; }
 die()  { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
+
+# Prints the header comment block as help text. The range is derived from the file rather
+# than hardcoded (`sed -n '2,25p'` was already wrong the first time the header grew), so
+# editing the header above cannot make --help print shell code.
+usage() {
+  awk 'NR>1 && !/^#/ {exit} NR>1 {sub(/^# ?/, ""); print}' "$0"
+}
+
+FULL=0
+CHECK=0
+# Parsed with a while/case over "$@" rather than `for arg in "$@"`: `--engine 4.1.3` is
+# two words, and `shift` inside a `for` loop only shifts the positional parameters, not the
+# loop's word list, so the version was seen again as an unknown option. (`--engine=4.1.3`
+# still works and is the form to use in scripts.)
+ENGINE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --full)  FULL=1; shift ;;
+    --check) CHECK=1; shift ;;
+    --engine)
+      [ $# -ge 2 ] || die "--engine needs a version, e.g. --engine=4.1.3"
+      ENGINE="$2"; shift 2
+      FULL=1   # an engine is what --full provisions; do not make them ask for both
+      ;;
+    --engine=*) ENGINE="${1#--engine=}"; FULL=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+done
 
 # ---------------------------------------------------------------------------
 # 0. Preflight
@@ -85,20 +109,27 @@ else
   PYTHONPATH=src "$FAST_VENV/bin/python" -c "
 import sparkscreen
 from sparkscreen.grammar.spec import SPECS
-assert len(SPECS) >= 2, 'expected both pinned grammars'
+assert SPECS, 'no grammars are pinned'
 print('    version   ', sparkscreen.__version__)
 print('    grammars  ', ', '.join(sorted(s.key for s in SPECS)))
 "
-  # The generated parsers are committed on purpose. If they were missing the import
-  # above would already have failed, so reaching here proves the modules are present;
-  # this second check proves they are *usable*, which is the claim that actually matters
-  # for a wheel with no JVM.
+  # The generated parsers are committed on purpose. If they were missing the import above
+  # would already have failed, so reaching here proves the modules are present; this check
+  # proves they are *usable*, which is the claim that actually matters for a wheel with no
+  # JVM.
+  #
+  # The key list is read from SPECS, never written out here. This loop once named
+  # spark-4.0, which F17 removed -- so setup.sh --full crashed on its own verification step
+  # and nothing noticed, because no CI job runs this script and _verify_readme.py only
+  # checks that the file is executable. Deriving the list means a future removal cannot
+  # leave this behind, and a test now asserts every key parses (see
+  # _verify_refs.py and tests/test_parser.py::test_version_specific_statements).
   PYTHONPATH=src "$FAST_VENV/bin/python" -c "
 from sparkscreen.grammar.parser import get_parser
-for key in ('spark-4.0', 'spark-3.5.1'):
-    parsed = get_parser(key).parse('select 1')
-    assert parsed, key
-print('    parsers load and parse, no JVM needed')
+from sparkscreen.grammar.spec import SPECS
+for spec in SPECS:
+    assert get_parser(spec.key).parse('select 1'), spec.key
+print('    parsers load and parse, no JVM needed:', len(SPECS), 'grammars')
 "
 fi
 
@@ -116,10 +147,25 @@ fi
 # a setup script that apt-gets into the host is not a setup script, it is a deployment.
 say "Locating a JVM (needed for the differential suite and grammar regeneration)"
 
+# Ordered by how portable each location is. The first entry was previously the only one,
+# which meant a contributor on any other host got a discovery miss and a silent skip --
+# the JVM is needed for the differential suite, so failing to find it quietly disabled the
+# exact thing --engine exists to enable. /usr/lib/jvm and /usr/java cover Linux and the
+# macOS Homebrew prefix; JAVA_HOME always wins if it is already set.
+# Each pattern is expanded unquoted so a glob that matches nothing degrades to a literal
+# path that simply fails the -x test. Quoting a pattern inside a for-list does NOT glob it
+# in bash -- "/opt/*/.jre/*" stays literal and the -x test fails against "*bin/java" --
+# which is how the original single-entry list stopped finding this host's JRE.
 JAVA_HOME_FOUND=""
-for cand in "${JAVA_HOME:-}" /opt/data/home/.jre/* /usr/lib/jvm/*/*; do
-  if [ -x "$cand/bin/java" ]; then JAVA_HOME_FOUND="$cand"; break; fi
+for cand in "${JAVA_HOME:-}" /usr/lib/jvm/* /usr/java/* /opt/java/* /Library/Java/JavaVirtualMachines/*/Contents/Home /opt/data/home/.jre/*; do
+  [ -n "$cand" ] || continue
+  if [ -x "${cand}/bin/java" ]; then JAVA_HOME_FOUND="$cand"; break; fi
 done
+# A java on PATH is the last resort, since that yields a bin dir rather than a JAVA_HOME.
+if [ -z "$JAVA_HOME_FOUND" ] && command -v java >/dev/null 2>&1; then
+  _jb="$(command -v java)"
+  JAVA_HOME_FOUND="$(cd "$(dirname "$_jb")/.." && pwd)"
+fi
 
 if [ -z "$JAVA_HOME_FOUND" ]; then
   warn "No JVM found. The differential suite will be skipped."
@@ -135,17 +181,60 @@ fi
 # ---------------------------------------------------------------------------
 # 3. The differential environment
 # ---------------------------------------------------------------------------
-if [ "$CHECK" = 0 ]; then
-  say "Differential environment ($DIFF_VENV) — pyspark $SPARK_VERSION"
-  [ -d "$DIFF_VENV" ] || uv venv "$DIFF_VENV" --python "$PY"
-  uv pip install --python "$DIFF_VENV/bin/python" -q -e ".[dev]" ".[diff]"
+provision_engine() {
+  # provision_engine <venv-path> <pyspark-version> <grammar-key>
+  local venv="$1" ver="$2" key="$3"
+  say "Differential environment ($venv) — pyspark $ver, grammar $key"
+
+  if [ "$CHECK" = 1 ]; then
+    [ -d "$venv" ] || die "$venv missing; run without --check"
+    got=$("$venv/bin/python" -c "import pyspark; print(pyspark.__version__)" 2>/dev/null) \
+      || die "$venv cannot import pyspark"
+    [ "$got" = "$ver" ] || die "$venv has pyspark $got, expected $ver"
+    echo "    pyspark $got"
+    return 0
+  fi
+
+  [ -d "$venv" ] || uv venv "$venv" --python "$PY"
+  # The pin is explicit rather than taken from [diff], because [diff] defaults to the
+  # oldest line. Verified afterwards against BOTH the engine version and the grammar the
+  # engine is supposed to be screened with -- engine_matrix maps one to the other, and a
+  # venv with the right engine wired to the wrong grammar is the silent-wrong-answer case.
+  uv pip install --python "$venv/bin/python" -q -e ".[dev]" \
+    "pyspark==$ver" "antlr4-python3-runtime==$ANTLR_VERSION" pytest
 
   say "Verifying"
-  "$DIFF_VENV/bin/python" -c "import pyspark; print('    pyspark', pyspark.__version__)"
+  "$venv/bin/python" - <<PYEOF
+import sys
+sys.path.insert(0, "src")
+import pyspark
+from tests.differential.engine_matrix import grammar_key_for_engine
+assert pyspark.__version__ == "$ver", f"installed {pyspark.__version__}, wanted $ver"
+key = grammar_key_for_engine(pyspark.__version__)
+assert key == "$key", f"engine maps to {key}, setup.sh expected $key"
+print(f"    pyspark {pyspark.__version__} -> grammar {key}")
+PYEOF
+
   if [ -n "$JAVA_HOME_FOUND" ]; then
-    say "Differential suite (first run builds a Spark session, so this takes a minute)"
-    "$DIFF_VENV/bin/python" -m pytest tests/differential/ -q \
-      -p no:cacheprovider 2>&1 | tail -3
+    say "Differential suite on $ver (first run starts a Spark session, so ~1min)"
+    "$venv/bin/python" -m pytest tests/differential/ -q -p no:cacheprovider 2>&1 | tail -3
+  else
+    warn "No JVM: skipping the live suite for $ver. The engine is installed, but"
+    warn "differential tests need java. Set JAVA_HOME and re-run with --check."
+  fi
+}
+
+provision_engine "$DIFF_VENV" "$SPARK_VERSION" "spark-3.5.1"
+
+if [ -n "$ENGINE" ]; then
+  # The grammar key is the engine version truncated to major.minor: 4.1.3 -> spark-4.1.
+  # Derived rather than looked up in a table, because a table is another thing to forget
+  # to update. _verify_refs.py fails if this produces a key spec.py does not ship.
+  ENGINE_KEY="spark-$(echo "$ENGINE" | cut -d. -f1,2)"
+  if [ "$ENGINE" = "$SPARK_VERSION" ]; then
+    say "Engine $ENGINE is the default; $DIFF_VENV already covers it"
+  else
+    provision_engine ".venv-pyspark-$ENGINE" "$ENGINE" "$ENGINE_KEY"
   fi
 fi
 
