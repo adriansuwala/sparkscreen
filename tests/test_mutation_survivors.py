@@ -329,6 +329,11 @@ class TestEveryFindingHasRealEnumMembers:
     them without a single test noticing -- because the tests assert on `verdict`, which
     is a different field.
 
+    `x__eval_write__mutmut_26` is the representative instance: `severity=None` on the
+    overwrite branch of `_eval_write`. It is killable here rather than per-branch because
+    `SOURCES` below drives one source per finding-producing branch and the invariant is
+    asserted over all of them, so dropping the keyword anywhere fails the same test.
+
     This is not a style preference. `Finding.to_dict()` reads `self.severity.value`, so
     a `None` there makes JSON serialisation raise `AttributeError` at exactly the moment
     a report is handed to a consumer. Asserting the invariant over a source that
@@ -564,7 +569,24 @@ class TestStatementLabelOnNonContextClasses:
         assert statement_label(Bare()) == "Bare"
 
     def test_a_context_class_loses_exactly_the_suffix(self, spec_key):
-        """The control, and the reason the strip is `len("Context")` and not `7`."""
+        """`x_statement_label__mutmut_5/8`: the strip that makes the label a label.
+
+        Two mutations of the one line that turns `DropTableContext` into `DropTable`:
+
+        - `mutmut_5` rewrites `[:-len("Context")]` to `[+len("Context")]`, which keeps
+          the first seven characters and the suffix: `DropTableContextContext`. Every
+          mapped label stops matching, so `effects_for_label()` raises
+          `UnmappedLabelError` on ordinary input;
+        - `mutmut_8` lowercases the suffix to `endswith("context")`, so no class name
+          matches and every context is returned whole -- the label universe fills with
+          `...Context` names that no effect mapping claims.
+
+        Both survive a suite that only ever asserted on `DropTable`'s label in one
+        place, because there was no assertion that the strip is exact.
+
+        This is also the control for the test above: it proves the length subtracted is
+        `len("Context")` and not a hardcoded 7.
+        """
         tree = get_parser(spec_key).parse("DROP TABLE prod.t").statements[0].tree
         assert statement_label(tree) == "DropTable"
 
@@ -600,6 +622,11 @@ class TestLabelUniverseContainsOnlyStatementLabels:
         holds only `accept`, `copyFrom`, `enterRule`, `exitRule` and `getRuleIndex`, and
         none of those maps to a context class that exists in `SqlBaseParser`, so the
         `classes.get(...)` lookup drops them either way. See `SURVIVORS_NOT_COVERED`.
+
+        The ledger nonetheless lists `x__child_rule_contexts__mutmut_3` as killed by
+        this class, and it is -- the `or` -> `and` mutation leaves the `_NOT_RULES`
+        clause intact, so the private-name filter still has a working half. The test
+        that proves it is the `startswith("_")` leak assertion below.
         """
         labels = labels_for_grammar(spec_key)
         assert labels
