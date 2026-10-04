@@ -148,12 +148,23 @@ class TestWheelContents:
             pytest.skip("mutation run: src/ is instrumented, so this wheel is not the real one")
 
         venv = tmp_path / "venv"
-        sp.run(["uv", "venv", str(venv), "-q"], check=True, capture_output=True)
-        sp.run(["uv", "pip", "install", "-q", str(built_wheel), "--python",
-                str(venv / "bin/python")], check=True, capture_output=True)
+        # stdlib venv, not `uv`. `uv` is a local convenience and is not installed on the
+        # CI runner, so shelling out to it failed with FileNotFoundError: 'uv' before the
+        # wheel was ever installed -- a test that could not run where it matters most.
+        # `python -m venv` is everywhere Python is.
+        sp.run([_sys.executable, "-m", "venv", str(venv)], check=True,
+               capture_output=True)
+        sp.run([str(venv / "bin/python"), "-m", "pip", "install", "-q",
+                str(built_wheel)], check=True, capture_output=True)
 
-        clean_env = {"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp")}
-        probe = _sys.executable  # reuse this interpreter only for -c text
+        # PATH is an EMPTY directory, not /usr/bin:/bin. GitHub's ubuntu runners
+        # preinstall a JDK at /usr/bin/java, so a PATH that keeps the usual system
+        # directories finds java and the `which('java') is None` assertion below fails --
+        # or, worse, a probe that tolerated java would prove nothing about the no-JVM
+        # path. Same reasoning as the `wheel` job in ci.yml, which uses /tmp/empty-bin.
+        empty_bin = tmp_path / "empty-bin"
+        empty_bin.mkdir()
+        clean_env = {"PATH": str(empty_bin), "HOME": os.environ.get("HOME", "/tmp")}
         code = (
             "import shutil;"
             "assert shutil.which('java') is None, 'java leaked onto PATH';"

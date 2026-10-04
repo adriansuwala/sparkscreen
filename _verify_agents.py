@@ -105,15 +105,31 @@ def main() -> int:
           bool(re.search(r"^generated/?$|grammar/generated", gitignore, re.M)), False)
 
     # --- the two-venv claim: the fast venv must NOT have pyspark ---
+    # The interpreters are looked up, not assumed. CI installs `.[dev]` into the job's
+    # own Python and has no `.venv` at all, so hardcoding `.venv/bin/python` made this
+    # audit die with FileNotFoundError before it checked a single claim. The running
+    # interpreter IS the fast environment in CI, so fall back to it.
+    fast_python = pathlib.Path(".venv/bin/python")
+    if not fast_python.exists():
+        fast_python = pathlib.Path(_sys.executable)
     fast = subprocess.run(
-        [str(ROOT / ".venv/bin/python"), "-c", "import pyspark"],
+        [str(fast_python), "-c", "import pyspark"],
         capture_output=True, text=True, cwd=ROOT)
-    check("the fast .venv does NOT have pyspark", fast.returncode != 0, True)
-    slow = subprocess.run(
-        [str(ROOT / ".venv-pyspark/bin/python"), "-c",
-         "import pyspark; print(pyspark.__version__)"],
-        capture_output=True, text=True, cwd=ROOT)
-    check(".venv-pyspark has pyspark 3.5.1", slow.stdout.strip(), "3.5.1")
+    check("the fast environment does NOT have pyspark", fast.returncode != 0, True)
+
+    # The differential venv is a local-only artifact -- CI has no `.venv-pyspark`, so
+    # the 3.5.1 pin is unverifiable there. Say so plainly instead of failing a claim
+    # that cannot be checked from this environment.
+    pyspark_python = pathlib.Path(".venv-pyspark/bin/python")
+    if pyspark_python.exists():
+        slow = subprocess.run(
+            [str(pyspark_python), "-c",
+             "import pyspark; print(pyspark.__version__)"],
+            capture_output=True, text=True, cwd=ROOT)
+        check(".venv-pyspark has pyspark 3.5.1", slow.stdout.strip(), "3.5.1")
+    else:
+        print("  SKIP .venv-pyspark has pyspark 3.5.1 "
+              "(no .venv-pyspark here; local-only two-venv layout)")
 
     # --- counts quoted in AGENTS.md must match reality ---
     from sparkscreen.analysis.effects import LABEL_EFFECTS
