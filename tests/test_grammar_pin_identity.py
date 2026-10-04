@@ -86,6 +86,7 @@ from pathlib import Path
 import pytest
 
 from sparkscreen.analysis import label_universe
+from sparkscreen.analysis.effects import LABEL_EFFECTS
 from sparkscreen.analysis.label_universe import labels_for_grammar, labels_for_parser_module
 from sparkscreen.grammar import spec as specmod
 from sparkscreen.grammar.parser import SqlParser, get_parser
@@ -466,6 +467,39 @@ def test_older_line_label_universe_is_a_subset_of_the_next():
     newer = labels_for_grammar("spark-4.1")
     missing = sorted(older - newer)
     assert not missing, f"3.5.1 emits {len(missing)} labels 4.1 cannot: {missing}"
+
+
+def test_4_2_only_labels_are_reachable_and_all_classified():
+    """The 4.2-only label set, with the two facts F20 got wrong stated as assertions.
+
+    F20 concluded from `codeLiteral` being absent from `statement` that the whole
+    dollar-quoting construct was dead upstream. The derivation disagrees: `CreateMetricView`
+    is a reachable 4.2 label. Both are true and they are different claims -- the rule is
+    unreachable *as a bare statement*, while `createMetricView` (its only caller) is a live
+    labeled alternative of `statement`.
+
+    The live engine agrees in the same way: `CREATE METRIC VIEW ...` is a parse error, but
+    at the word `METRIC`, because that keyword is absent from the upstream lexer too. Two
+    independent gates, neither of which is "this syntax does not exist" -- so a future
+    release could add `METRIC` to its lexer and make the rule reachable with no grammar
+    change, which is precisely when the pin must be re-cut. Pinning the reachable set here
+    is what makes that move visible.
+
+    Also asserts every 4.2-only label is classified, which is the invariant that made the
+    hr0 split free: a new label with no entry in `LABEL_EFFECTS` would raise rather than
+    silently return an empty effect list.
+    """
+    only_42 = set(labels_for_grammar("spark-4.2")) - set(labels_for_grammar("spark-4.1"))
+    assert "CreateMetricView" in only_42, (
+        "CreateMetricView is expected to be a reachable 4.2-only label. If it has become "
+        "unreachable, the dollar-quoting rule's last caller went away and F20's stronger "
+        "claim is correct after all -- update F20 with the measured reason."
+    )
+    unmapped = sorted(label for label in only_42 if label not in LABEL_EFFECTS)
+    assert not unmapped, (
+        f"4.2-only labels with no entry in LABEL_EFFECTS: {unmapped}. effects_for_label() "
+        f"raises on an unmapped label, so these would fail closed at screening time."
+    )
 
 
 def test_4_1_and_4_2_differ_only_by_the_measured_rename(upstream_grammars):

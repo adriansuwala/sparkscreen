@@ -660,6 +660,22 @@ grammars. `screen()` returns `UNKNOWN` for every dollar-quoted form tried, on ev
 which is the fail-closed outcome and also the truthful one: no pinned Spark release accepts
 this syntax at top level.
 
+**Correction, found later by the label derivation.** I wrote that `codeLiteral` was used only
+by `createMetricView`, which is true, and then treated the whole construct as dead. That
+conclusion does not follow. The derivation for `spark-4.2` reports **`CreateMetricView` as a
+reachable label**, and it is one of the nine labels 4.2 has that 4.1 does not. So the rule is
+unreachable *as a bare statement*, not unreachable *full stop* — and the live engine agrees
+in the same way: `CREATE METRIC VIEW` fails, but at the word `METRIC`, because that keyword
+is not in the upstream lexer either. Two independent gates, neither of which is "this syntax
+does not exist".
+
+The distinction that survives: no pinned Spark release parses a dollar-quoted literal in any
+position, so `UNKNOWN` remains correct for every form. But "the parser cannot reach it" and
+"the syntax is not implemented" are different claims, and only the first is established. A
+future release could add `METRIC` to its lexer and the rule would start being reachable with
+no grammar change at all, at which point `spark-4.2` would need to be re-pinned to stay
+honest. Worth knowing, since the pin-identity guard would flag exactly that move.
+
 So the claim was a capability assertion with nothing behind it — the same shape as the
 `Reason.PYTHON_DANGEROUS_CALL` invariant and as F17 itself. It was not caught by any test
 because no test asserted it, and the comment that carried it was edited in the same commit
