@@ -680,3 +680,63 @@ pinned grammar, because upstream 4.2.0 itself cannot parse one at top level.
 Recorded rather than merely deleted, because the generalisable failure is the interesting
 part: a comment asserting a capability is a claim, and it needs the same evidence as any
 other claim. A lexer-token count across the pinned grammars settles it in one command.
+
+## F21 — all seven 4.2 divergences confirmed against a live Spark 4.2.0 engine
+
+Every 4.x claim up to here was grammar-level: generated parsers and read rule bodies. A
+pyspark 4.2.0 engine on JDK 17 was installed into a scratch venv and used to check them
+against the real Catalyst parser, so the answers no longer rest on reading a `.g4`.
+
+**The discriminator matters.** `spark.sql()` conflates parse failure with analysis failure,
+and a first pass through it reported 12 rejections that were ambiguous — `CHANGES FROM` on a
+catalog without CDC, `CALL sys.system_info()` on an unresolvable routine, and `DROP TABLE t`
+on a table that did not exist all "failed" while their syntax was perfectly valid. The engine's
+parser called directly —
+
+    spark._jsparkSession.sessionState().sqlParser().parsePlan(sql)
+
+— throws only on a syntax error and returns otherwise, which is exactly the question
+sparkscreen asks. A live differential that goes through `spark.sql()` will manufacture
+false divergences; that is a trap worth naming, because the first version of this probe hit it.
+
+**Confirmed, on all seven:**
+
+| construct | parses on 4.2.0 |
+|---|---|
+| `QUALIFY` | yes |
+| `CHANGES FROM VERSION 1` | yes |
+| `CHANGES FROM SYSTEM_VERSION 1 TO VERSION 9` | yes |
+| `JOIN ... APPROX NEAREST BY DISTANCE` | yes |
+| `JOIN ... EXACT NEAREST BY SIMILARITY` | yes |
+| `INSERT ... REPLACE WHERE` | yes |
+| `INSERT ... REPLACE USING (a)` | yes |
+
+The 4.1-era surface also parses on 4.2.0, so 4.1 is a subset in practice as well as in rule
+sets: `PRIMARY KEY`, `FOREIGN KEY`, `CREATE STREAMING TABLE`, the `WINDOW` clause,
+`TABLESAMPLE`, `REPLACE WHERE`, `CALL`, `EXECUTE IMMEDIATE`, and compound `BEGIN ... END`.
+
+**F20 re-confirmed by a second route.** Dollar quoting fails to parse on a real 4.2.0 engine
+in every position tried — `SELECT $$abc$$`, bare `$$abc$$`, tagged `$tag$abc$tag$`, and as an
+`EXECUTE IMMEDIATE` payload. Independently, `createMetricView` (the only user of
+`codeLiteral`) turns out to be dead upstream for a *second* reason: the rule exists at
+`SqlBaseParser.g4:337` but its `METRIC` keyword is **not in the lexer**, so
+`CREATE METRIC VIEW ...` is itself a parse error. The construct is doubly unreachable, which
+is a stronger statement than F20 made from the grammar alone.
+
+**Two probes of mine were wrong, and both were caught by the engine.**
+
+`SELECT 1 |> double` was labelled "4.0 surface" and rejected. It is not a grammar gap: the
+pipe operator is **absent from the vendored 4.2 grammar itself**, and the engine rejects it
+too — it is gated on a config upstream that this build does not enable. Our grammar agrees
+with the engine, which is the correct behaviour, and the label was the error. The grammar
+comment about `|` vs `|>` compatibility sits at lines 58-66 of the parser grammar, so the
+syntax is known upstream and deliberately not in the default surface.
+
+`CREATE METRIC VIEW mv AS $$...$$` was rejected at the word `METRIC`, not at `$$` — a
+different failure than the one I was testing for, and only visible because I checked the
+error text rather than the boolean.
+
+**What this does and does not settle.** It closes the gap that every 4.x finding so far rested
+on grammar reading alone. It does not cover 4.1 or 3.5.1 against live engines — 4.1 is still
+grammar-verified only, and the CI matrix in `sparkscreen-bp4` is what will hold that line
+honestly from now on.
