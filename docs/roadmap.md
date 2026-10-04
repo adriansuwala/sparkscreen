@@ -21,26 +21,32 @@ br dep tree <issue>
 br dep cycles
 ```
 
-| id | | |
-|---|---|---|
-| `sparkscreen-rn6` | **P0** | Detect DataFrame write sinks (`saveAsTable`, `save`, `jdbc`) |
-| `sparkscreen-120` | P1 | Decision: should unbounded `DELETE`/`MERGE` carry `DESTROY_DATA`? |
-| `sparkscreen-r50` | P2 | Decision: `LOAD DATA` `READ_LOCAL_FS` over-approximation |
-| `sparkscreen-dhe` | P2 | Split `Verdict.UNKNOWN` into `REVIEW` vs `UNKNOWN` — blocked by `rn6` |
-| `sparkscreen-znf` | P3 | `dbutils` and dangerous Python call screening — scope decision first |
+Every row below is **closed**. This table is a pointer to where each decision landed,
+because `docs/decisions.md` is where the reasoning actually lives. Open work is filed as
+`br` issues, not here — run `br list` for that, and treat its output as authoritative
+over anything written here.
 
-Each issue carries its reasoning inline, so the "why" survives without needing
-`docs/roadmap.md` open alongside it.
+| id | | decided in |
+|---|---|---|
+| `sparkscreen-rn6` | DataFrame write sinks (`saveAsTable`, `save`, `jdbc`) | shipped — see "Where we are" below |
+| `sparkscreen-dhe` | Split `UNKNOWN` into `REVIEW` vs `UNKNOWN` | [D18](decisions.md#d18--split-unknown-into-review-and-unknown-the-exit-code-stays-binary) |
+| `sparkscreen-120` | Should unbounded `DELETE`/`MERGE` carry `DESTROY_DATA`? | [D15](decisions.md#d15--destroy_data-on-deleteupdatemerge-is-a-slowdown-flag-not-a-damage-estimate) — yes |
+| `sparkscreen-r50` | `LOAD DATA` `READ_LOCAL_FS` over-approximation | [D17](decisions.md#d17--keep-the-over-approximation-when-the-false-positive-is-cheaper) — keep it |
+| `sparkscreen-znf` | `dbutils` / dangerous Python call screening | [D16](decisions.md#d16--a-never-emitted-reason-is-a-defect) — out of scope |
+
+Open work is filed as `br` issues, not in this file. If you are adding a row here, it is
+because the decision was made and you are recording where; the reverse — deciding a
+question *in* this table — is what made it drift in the first place.
 
 ---
 
 ## Where we are
 
-`master` is green: **2,479 tests passing in ~16s**, 16 skipped, 8 xfailed (all documented
+`master` is green: **2,929 tests passing in ~22s**, 17 skipped, 8 xfailed (all documented
 gaps, none accidental). **51 differential expectations re-verified against a live Spark
 3.5.1** — 40 SQL plus 11 DataFrame, the latter asserting row counts actually drop on
 overwrite. Wheel ships the parsers and runs with no JVM. A 20-statement file screens in
-**~12 ms** warm for a 20-statement file; see `scripts/bench.py`.
+**~12 ms** warm (median 11.9 ms measured by `scripts/bench.py`).
 
 Detected today, and only this:
 
@@ -66,7 +72,10 @@ Not detected: everything else. See
 
 The DataFrame API is the largest remaining gap and the reason the `Effect` axis exists.
 
-### 1. ~~`Effect` axis~~ — done (`0cc01f6`)
+### 1. ~~`Effect` axis~~ — done
+
+(The commit SHAs this file used to cite here do not resolve in this repository's history;
+cited by name instead, with the code and the test as the evidence.)
 
 Shipped. 122 labels mapped across both grammars, derived from the generated parser
 classes rather than a corpus, and `effects_for_label()` raises `UnmappedLabelError`
@@ -79,13 +88,13 @@ from the labels we already resolve, so it is additive rather than a rewrite.
 Everything else in this section has somewhere to put its results, which is why this goes
 first.
 
-### 2. ~~DataFrame write detection~~ — done (`22ed358`)
+### 2. ~~DataFrame write detection~~ — done
 
 Shipped, with the oracle converted into assertions. `tests/differential/
 test_dataframe_writes.py` runs against a live Spark 3.5.1 and checks that an overwrite
 takes a target from 3 rows to 2, that an append takes it to 4, and that default mode
 raises `TABLE_OR_VIEW_ALREADY_EXISTS` and changes nothing. Aliased writers
-(`w = df.write`) are covered since `a4c40ab`; the branch-merge gap that remains is
+(`w = df.write`) are covered; the branch-merge gap that remains is
 [F16](findings.md#f16--a-writer-bound-in-both-arms-of-an-if-loses-its-binding-savejdbc-report-allow).
 
 `df.write.mode(...).saveAsTable(...)`, `.save(...)`, `.insertInto(...)`, `.jdbc(...)`,
@@ -125,7 +134,7 @@ far more trustworthy.
 
 ## Deferred
 
-### ~~`REVIEW` / `UNKNOWN` verdict split~~ — done (`080fb93`)
+### ~~`REVIEW` / `UNKNOWN` verdict split~~ — done
 
 Shipped. See [D18](decisions.md#d18--split-unknown-into-review-and-unknown-the-exit-code-stays-binary).
 The exit-code constraint held: `REVIEW` and `UNKNOWN` both exit 2, as the deferral note
@@ -181,8 +190,9 @@ aggregation path which has already produced one production bug (F1).
 ### Publishing — ~1h, no new code
 
 The wheel builds and is verified in a clean venv with `java` off `PATH`, carrying both
-grammar pairs. What is missing is the boring part: a real version number (it is still
-`0.1.0`), a `LICENSE`/author block check, a tagged release, and PyPI credentials. This is
+grammar pairs. What is missing is the boring part: a `LICENSE`/author block check, a
+tagged release, and PyPI credentials — the version is already `0.8.0`, set in
+`pyproject.toml` and read from there by `src/sparkscreen/__init__.py`. This is
 the shortest path from "works on my machine" to "installable", and it is the only item
 here that is not blocked on a design question.
 
@@ -217,11 +227,9 @@ without an oracle**, and that distinction is the one worth internalising:
 
 The general rule this project keeps rediscovering: **a test suite that can only check
 your reasoning has not found the bug you care about.** F6 was invisible to a complete,
-correct, 100%-passing corpus. Differential oracles are not a luxury here| id | | |
-|---|---|---|
-| _(none open)_ | | the ledger is empty; all five seeded issues are closed |
+correct, 100%-passing corpus. Differential oracles are not a luxury here.
 
-Every seeded issue is closed, with its reasoning inline on the issue rather than only in
-this file — which is the point of having a tracker. Closed: `rn6` (DataFrame writes),
-`120` (`DELETE`/`MERGE` destruction), `r50` (`LOAD DATA`), `znf` (Python scope),
-`dhe` (verdict split)..
+Every seeded issue is closed, with its reasoning inline on the issue itself rather than
+only in this file — which is the point of having a tracker. Closed: `rn6` (DataFrame
+writes), `120` (`DELETE`/`MERGE` destruction), `r50` (`LOAD DATA`), `znf` (Python
+scope), `dhe` (verdict split). Run `br list` for current state.

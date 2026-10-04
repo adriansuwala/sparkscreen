@@ -284,6 +284,21 @@ cannot name a test that emits a value, it does not belong in the enum.
 
 ## D17 — keep the over-approximation when the false positive is cheaper
 
+**Accepted** (`sparkscreen-r50`, 2026-10-02).
+
+`LOAD DATA INPATH` and `LOAD DATA LOCAL INPATH` share the `LoadData` label, so
+`READ_LOCAL_FS` fires on both. The precise fix is keying on `(label, local)` from the
+parse tree. We keep the approximation.
+
+The bias is what matters: the canonical attack is `LOAD DATA LOCAL INPATH '/etc/passwd'`,
+so the direction that errs toward *not* flagging is the one we must not take. One false
+positive on the non-LOCAL form is a cheaper error than one false negative on the LOCAL
+form, and the flag can be waived in policy. Precise-but-fail-open would be the wrong
+trade for a security tool; "don't fragment the flags into too many pieces" is the same
+instinct stated more generally.
+
+---
+
 
 ## D18 — split UNKNOWN into REVIEW and UNKNOWN; the exit code stays binary
 
@@ -326,16 +341,3 @@ belongs in the `verdict` field, which every consumer already parses.
   silently dropping `OUTSIDE_ALLOWLIST` from the report. It now prefers by attention
   needed rather than by one specific verdict, which makes that class of regression
   structural rather than incidental.
-
-**Accepted** (`sparkscreen-r50`, 2026-10-02).
-
-`LOAD DATA INPATH` and `LOAD DATA LOCAL INPATH` share the `LoadData` label, so
-`READ_LOCAL_FS` fires on both. The precise fix is keying on `(label, local)` from the
-parse tree. We keep the approximation.
-
-The bias is what matters: the canonical attack is `LOAD DATA LOCAL INPATH '/etc/passwd'`,
-so the direction that errs toward *not* flagging is the one we must not take. One false
-positive on the non-LOCAL form is a cheaper error than one false negative on the LOCAL
-form, and the flag can be waived in policy. Precise-but-fail-open would be the wrong
-trade for a security tool; "don't fragment the flags into too many pieces" is the same
-instinct stated more generally.
