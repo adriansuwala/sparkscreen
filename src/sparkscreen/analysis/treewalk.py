@@ -316,6 +316,55 @@ def _identifier_types(grammar_key: str | None = None) -> frozenset[int]:
         _TOKEN_TYPES[grammar_key] = identifier_token_types(grammar_key)
     return _TOKEN_TYPES[grammar_key]
 
+#: Contexts in which the grammar spells an identifier using a token that is *not*
+#: `IDENTIFIER`.
+#:
+#: `strictIdentifier` is `IDENTIFIER | quotedIdentifier | nonReserved | ...`, so a
+#: component written as a non-reserved *keyword* reaches the tree carrying that
+#: keyword's own token type. Collecting only `IDENTIFIER`/`BACKQUOTED_IDENTIFIER`
+#: terminals therefore silently deletes those components. `x` is the sharpest case,
+#: because the lexer has `BINARY_HEX: 'X'` (the `X'1A'` hex-literal marker), so the
+#: component of `prod.x` is lexed as a *binary-hex literal* token rather than an
+#: identifier -- and `insert into prod.x.y` came out as `prod.y`, a name strictly
+#: *broader* than the one written, so a `prod.*` allowlist matched a table the operator
+#: never authorised. That is F14, and it was never about aliases: the
+#: `TableAliasContext` in `FROM prod.x.y` is empty and the tree for `x` has the same
+#: shape as for `y`.
+#:
+#: It is not just `x`. 425 of the 428 `nonReserved` alternatives lex as a non-identifier
+#: token, so `prod.AFTER`, `prod.SCHEMA`, `prod.BIGINT` and `prod.USER` were all
+#: truncated the same way. Verified against live Spark 3.5.1: a table seeded as
+#: `prod.AFTER` is read back by `select * from prod.AFTER`, so the keyword is genuinely a
+#: component of the table name.
+#:
+#: Why these and not the enclosing `UnquotedIdentifierContext`: these are reached *by
+#: context class*, which is what makes them immune to ANTLR's per-grammar token
+#: numbering. A keyword terminal's number means nothing under the wrong grammar, but the
+#: fact that it is a keyword inside an identifier position does -- the same property
+#: that already makes backquoted identifiers resolve under either key (see
+#: `test_backquoted_identifiers_resolve_regardless_of_grammar_key`).
+#:
+#: `UnquotedIdentifierContext` is deliberately EXCLUDED, and that exclusion is load-
+#: bearing: a plain identifier reaches the tree directly under it carrying an
+#: `IDENTIFIER` token, so accepting every terminal there would collect the name under
+#: *either* grammar and silently destroy the wrong-key-yields-nothing canary that
+#: `test_grammar_key_must_match_the_parser_it_came_from` pins. Plain identifiers stay
+#: gated on the token number, which is correct -- that is exactly what the token number
+#: is for.
+#:
+#: Accepting a keyword is the fail-closed direction: an extra component only adds a name
+#: the policy will not match, whereas dropping one loses a destructive target from the
+#: allowlist entirely.
+#:
+#: Also deliberately absent: `IdentifierLiteralContext`, whose children include the
+#: `IDENTIFIER_KW` token and a string literal rather than name text (handled separately),
+#: and the `MINUS` under `ErrorIdentContext` (`prod.a-b`), a separate open question.
+_IDENTIFIER_SPELLING_RULES = frozenset({
+    "NonReservedContext",
+    "StrictNonReservedContext",
+    "AnsiNonReservedContext",
+})
+
 # Contexts whose identifier is a path/URI rather than a table name.
 _STRING_PATH_RULES = (
     "LocationSpecContext",
@@ -410,9 +459,15 @@ def _parts(node: ParseTree, *, grammar_key: str | None = None) -> tuple[list[str
     """
     out: list[str] = []
     quoted = False
+    #: True while descending inside one of `_IDENTIFIER_SPELLING_RULES`. Under such a
+    #: context every terminal is name text regardless of its token type -- that is the
+    #: whole point: a component spelled with a non-reserved keyword (`x`, `AFTER`,
+    #: `SCHEMA`, ...) carries that keyword's token, not `IDENTIFIER`, and filtering on
+    #: token type alone is what dropped it (F14).
+    in_identifier = False
 
     def rec(n: ParseTree, depth: int = 0) -> None:
-        nonlocal quoted
+        nonlocal quoted, in_identifier
         if depth > 12:
             return
         cls = type(n).__name__
@@ -434,11 +489,19 @@ def _parts(node: ParseTree, *, grammar_key: str | None = None) -> tuple[list[str
             return
         if cls == "TerminalNodeImpl":
             tok = n.getSymbol()
-            if tok is not None and tok.type in _identifier_types(grammar_key):
+            if tok is None:
+                return
+            if tok.type in _identifier_types(grammar_key) or in_identifier:
                 out.append(_unquote(tok.text))
             return
-        for c in getattr(n, "children", []) or []:
-            rec(c, depth + 1)
+        was = in_identifier
+        if cls in _IDENTIFIER_SPELLING_RULES:
+            in_identifier = True
+        try:
+            for c in getattr(n, "children", []) or []:
+                rec(c, depth + 1)
+        finally:
+            in_identifier = was
 
     rec(node)
     return [p for p in out if p], quoted
