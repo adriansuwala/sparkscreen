@@ -197,9 +197,23 @@ jobs:
     # that disagrees with the Spark it claims to screen for -- the case-insensitivity bug
     # was invisible to the entire hand-written corpus.
     #
+    # Matrixed over every pinned engine, one job per version, NOT one job installing
+    # "the newest pyspark". Three grammars ship, so one engine leaves two of them with
+    # no live check at all, and a newest-wins job silently narrows the matrix every time
+    # Spark releases. The matrix is the list of grammar keys in spec.py; the suite's
+    # test_engine_matrix_covers_every_pinned_grammar asserts the two agree, so adding a
+    # grammar without adding a version here fails the fast suite instead of rotting.
+    #
     # Needs a JVM and a real pyspark, so it is separate from the fast suite by design.
     runs-on: ubuntu-latest
-    # Generous: Spark session startup dominates, and the local run takes ~70s on a warm
+    strategy:
+      fail-fast: false
+      matrix:
+        # Match these to the pyspark releases the grammar pins were generated from.
+        # 3.5.1 and 4.2.0 are the pin releases; 4.1.3 is the newest 4.1 patch, so a 4.1
+        # user on any patch gets the line checked at its most capable point.
+        pyspark-version: ["3.5.1", "4.1.3", "4.2.0"]
+    # Generous: Spark session startup dominates, and a local run takes ~70s on a warm
     # machine with a local JVM. Cold CI plus JVM download needs real headroom.
     timeout-minutes: 45
     steps:
@@ -217,27 +231,48 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Install with pyspark
-        # `[diff]` pins pyspark==3.5.1 in pyproject.toml. The recorded expectations in
-        # tests/differential/corpus.py describe one specific Spark version's behaviour,
-        # so "the newest one" would silently invalidate them. The pin belongs in
-        # pyproject.toml, not here.
+      - name: Install the matrixed engine
+        # The version comes from the matrix, not from pyproject. `[diff]` still pins
+        # pyspark==3.5.1 because that is the default a developer gets locally; CI
+        # overrides it here so all three engines are reachable from one definition.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,diff]"
+          pip install -e ".[dev]"
+          pip install "pyspark==${{ matrix.pyspark-version }}"
 
-      - name: Confirm the pinned engine and a working JVM
-        # If either of these is wrong the suite below would skip or fail confusingly
-        # rather than telling us the environment was wrong.
+      - name: Confirm the engine and a working JVM
+        # If either is wrong the suite below would skip or fail confusingly rather than
+        # telling us the environment was wrong. Checking the exact version is the point:
+        # it is what proves the matrix entry, not the resolver, chose the engine.
         run: |
-          python -c "import pyspark; assert pyspark.__version__ == '3.5.1', pyspark.__version__; print('pyspark', pyspark.__version__)"
+          python -c "import pyspark; assert pyspark.__version__ == '${{ matrix.pyspark-version }}', pyspark.__version__; print('pyspark', pyspark.__version__)"
           java -version
           echo "JAVA_HOME=$JAVA_HOME"
 
-      - name: Differential suite against real Spark 3.5.1
+      - name: Differential suite against Spark ${{ matrix.pyspark-version }}
         # No PYTHONPATH needed: pyproject sets pythonpath = ["src"] for pytest, and
         # tests/differential inserts its own paths at import time. Verified locally.
         run: python -m pytest tests/differential/ -v
+
+      - name: Prove the suite actually ran
+        # The differential modules gate on `importorskip("pyspark")`, so a job whose
+        # engine failed to install, or whose JVM is wrong, reports SUCCESS having executed
+        # nothing -- three green jobs, zero checks. pytest exits 0 on an all-skipped run,
+        # so the suite step above cannot catch it.
+        #
+        # `pytest --collect-only -q` prints one `file: count` line per collected module
+        # and nothing at all when every module skips at import. Measured, not assumed:
+        # with a real engine it prints 40/11/13/26 = 90; with no engine it prints
+        # nothing and exits 0. Counting those lines is therefore the check.
+        run: |
+          python -m pytest tests/differential/ -p no:cacheprovider --collect-only -q             | tee /tmp/collected.txt
+          count=$(awk -F': ' '/^tests[/\]differential[/\].*\.py: [0-9]+$/ { n += $2 } END { print n+0 }' /tmp/collected.txt)
+          echo "engine tests collected: $count"
+          if [ "$count" -lt 90 ]; then
+            echo "::error::differential suite collected only $count engine tests (expected 90). The engine did not load, so this job checked nothing."
+            exit 1
+          fi
+          echo "differential suite collected $count engine tests for Spark ${{ matrix.pyspark-version }}"
 
   docs:
     # The four documentation audits. These are standalone scripts, NOT pytest tests, so
