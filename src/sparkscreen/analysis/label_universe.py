@@ -49,6 +49,7 @@ effect entries for them forever.
 from __future__ import annotations
 
 import importlib
+from types import ModuleType
 from typing import Iterator
 
 from ..grammar.spec import SPECS, get_spec
@@ -131,9 +132,23 @@ def labels_for_grammar(grammar_key: str | None = None) -> frozenset[str]:
     """Every label `effective_label()` can return under one pinned grammar.
 
     `grammar_key=None` means the default grammar, matching `get_spec(None)`.
+
+    Resolves the spec out of `SPECS` by key, so it can only ever describe a grammar this
+    package ships. `labels_for_parser_module` is the same walk over an arbitrary imported
+    `SqlBaseParser` module -- which is what a pin-identity test needs, since its subject
+    is a grammar built outside the package tree that no key can name.
     """
     spec = get_spec(grammar_key)
     module = importlib.import_module(f"{spec.python_module('SqlBaseParser')}")
+    return labels_for_parser_module(module)
+
+
+def labels_for_parser_module(module: ModuleType) -> frozenset[str]:
+    """`labels_for_grammar`, over an already-imported `SqlBaseParser` module.
+
+    Split out so the derivation has exactly one implementation. A test that re-derives
+    the label set by its own traversal is a second implementation, and the two drift.
+    """
     classes = _context_classes(module.SqlBaseParser)
 
     labels: set[str] = set()
