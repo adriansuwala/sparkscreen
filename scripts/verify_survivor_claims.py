@@ -27,45 +27,54 @@ ROOT = Path(__file__).resolve().parent.parent
 PY = str(ROOT / ".venv/bin/python")
 TOOL = str(ROOT / "scripts/_mutant_diff.py")
 
-#: (mutant name, test class in tests/test_mutation_survivors.py that must kill it).
+#: (mutant name, test module, test class that must kill it).
+#:
+#: The module is carried per-entry rather than assumed. Two entries point at
+#: `TestSeverityIsRankedAsDocumented`, which lives in test_decision_boundaries.py and
+#: NOT in test_mutation_survivors.py -- assuming one file silently produced two
+#: permanent CONTROL FAILEDs, which is indistinguishable from a broken scratch tree.
+SURVIVORS = "tests/test_mutation_survivors.py"
+BOUNDARIES = "tests/test_decision_boundaries.py"
+
 CLAIMED = [
     # -- screen._combine: which finding becomes the report headline
-    ("x__combine__mutmut_5", "TestCombinePrefersTheFindingNeedingAttention"),
+    ("x__combine__mutmut_5", SURVIVORS, "TestCombinePrefersTheFindingNeedingAttention"),
     # -- screen._eval_one: combine only when there is something to combine
-    ("x__eval_one__mutmut_40", "TestEvalOneCombinesOnlyWhenItMust"),
+    ("x__eval_one__mutmut_40", SURVIVORS, "TestEvalOneCombinesOnlyWhenItMust"),
     # -- screen._eval_write: targets, and severity
-    ("x__eval_write__mutmut_4", "TestDataFrameWriteClaimsOnlyWhatItKnows"),
-    ("x__eval_write__mutmut_39", "TestDataFrameWriteClaimsOnlyWhatItKnows"),
+    ("x__eval_write__mutmut_4", SURVIVORS, "TestDataFrameWriteClaimsOnlyWhatItKnows"),
+    ("x__eval_write__mutmut_39", SURVIVORS, "TestDataFrameWriteClaimsOnlyWhatItKnows"),
     # -- analysis.calls: the layer that decides whether a destination is knowable
-    ("x\u01c1_WriteFinder\u01c1_recover_target__mutmut_16",
-     "TestDataFrameWriteClaimsOnlyWhatItKnows"),
-    ("x\u01c1_WriteFinder\u01c1_recover_target__mutmut_18",
-     "TestDataFrameWriteClaimsOnlyWhatItKnows"),
-    ("x\u01c1_WriteFinder\u01c1_recover_target__mutmut_5",
-     "TestDataFrameWriteClaimsOnlyWhatItKnows"),
-    ("x\u01c1_WriteFinder\u01c1_recover_target__mutmut_6",
-     "TestDataFrameWriteClaimsOnlyWhatItKnows"),
-    ("x__eval_write__mutmut_26", "TestEveryFindingHasRealEnumMembers"),
-    ("x__eval_write__mutmut_29", "TestDataFrameWriteClaimsOnlyWhatItKnows"),
-    ("x_screen__mutmut_72", "TestLengthLimitFindingsCarryTheirEvidence"),
-    ("x__eval_write__mutmut_105", "TestSeverityIsRankedAsDocumented"),
-    ("x_default_policy__mutmut_55", "TestSeverityIsRankedAsDocumented"),
+    ("xǁ_WriteFinderǁ_recover_target__mutmut_16",
+     SURVIVORS, "TestDataFrameWriteClaimsOnlyWhatItKnows"),
+    ("xǁ_WriteFinderǁ_recover_target__mutmut_18",
+     SURVIVORS, "TestDataFrameWriteClaimsOnlyWhatItKnows"),
+    ("xǁ_WriteFinderǁ_recover_target__mutmut_5",
+     SURVIVORS, "TestDataFrameWriteClaimsOnlyWhatItKnows"),
+    ("xǁ_WriteFinderǁ_recover_target__mutmut_6",
+     SURVIVORS, "TestDataFrameWriteClaimsOnlyWhatItKnows"),
+    ("x__eval_write__mutmut_26", SURVIVORS, "TestEveryFindingHasRealEnumMembers"),
+    ("x__eval_write__mutmut_29", SURVIVORS, "TestDataFrameWriteClaimsOnlyWhatItKnows"),
+    ("x_screen__mutmut_72", SURVIVORS, "TestLengthLimitFindingsCarryTheirEvidence"),
     # -- limits
-    ("x_screen__mutmut_82", "TestLengthLimitFindingsCarryTheirEvidence"),
-    ("x__checked_num__mutmut_3", "TestFoldedConstantBoundsAreInclusive"),
+    ("x_screen__mutmut_82", SURVIVORS, "TestLengthLimitFindingsCarryTheirEvidence"),
+    ("x__checked_num__mutmut_3", SURVIVORS, "TestFoldedConstantBoundsAreInclusive"),
     # -- treewalk
-    ("x__is_bare_table_ref__mutmut_2", "TestBareIdentifierAtTheWalkRoot"),
-    ("x_statement_label__mutmut_4", "TestStatementLabelOnNonContextClasses"),
-    ("x_statement_label__mutmut_5", "TestStatementLabelOnNonContextClasses"),
-    ("x_statement_label__mutmut_8", "TestStatementLabelOnNonContextClasses"),
+    ("x__is_bare_table_ref__mutmut_2", SURVIVORS, "TestBareIdentifierAtTheWalkRoot"),
+    ("x_statement_label__mutmut_4", SURVIVORS, "TestStatementLabelOnNonContextClasses"),
+    ("x_statement_label__mutmut_5", SURVIVORS, "TestStatementLabelOnNonContextClasses"),
+    ("x_statement_label__mutmut_8", SURVIVORS, "TestStatementLabelOnNonContextClasses"),
     # -- model.effect_names
-    ("x_effect_names__mutmut_3", "TestEffectNamesExpandsPastAZeroMember"),
+    ("x_effect_names__mutmut_3", SURVIVORS, "TestEffectNamesExpandsPastAZeroMember"),
+    # -- these two live in test_decision_boundaries.py, NOT in test_mutation_survivors.py
+    ("x__eval_write__mutmut_105", BOUNDARIES, "TestSeverityIsRankedAsDocumented"),
+    ("x_default_policy__mutmut_55", BOUNDARIES, "TestSeverityIsRankedAsDocumented"),
     # -- documented as NOT covered: these must still survive
-    ("x__eval_one__mutmut_36", "TestEvalOneCombinesOnlyWhenItMust"),
-    ("x__eval_write__mutmut_5", "TestDataFrameWriteClaimsOnlyWhatItKnows"),
-    ("x__is_bare_table_ref__mutmut_3", "TestBareIdentifierAtTheWalkRoot"),
+    ("x__eval_one__mutmut_36", SURVIVORS, "TestEvalOneCombinesOnlyWhenItMust"),
+    ("x__eval_write__mutmut_5", SURVIVORS, "TestDataFrameWriteClaimsOnlyWhatItKnows"),
+    ("x__is_bare_table_ref__mutmut_3", SURVIVORS, "TestBareIdentifierAtTheWalkRoot"),
     ("x__child_rule_contexts__mutmut_3",
-     "TestLabelUniverseContainsOnlyStatementLabels"),
+     SURVIVORS, "TestLabelUniverseContainsOnlyStatementLabels"),
 ]
 
 #: Mutants the test file documents as NOT covered -- unreachable from real input or
@@ -81,14 +90,50 @@ EXPECT_SURVIVE = {
 
 def main() -> int:
     failures = []
-    for mutant, cls in CLAIMED:
-        node = f"tests/test_mutation_survivors.py::{cls}"
-        proc = subprocess.run([PY, TOOL, mutant, "--kill", node], cwd=ROOT,
-                              capture_output=True, text=True, timeout=900)
-        out = proc.stdout
+    for mutant, module, cls in CLAIMED:
+        node = f"{module}::{cls}"
+        try:
+            proc = subprocess.run([PY, TOOL, mutant, "--kill", node], cwd=ROOT,
+                                  capture_output=True, text=True, timeout=1800)
+        except subprocess.TimeoutExpired:
+            # An outer timeout must not abort the whole ledger: every entry after this
+            # one would go unchecked and the run would still look like it ran.
+            failures.append(f"{mutant}: harness timed out after 1800s -- "
+                            f"the result is unknown, not a pass")
+            print(f"!! {mutant:48s} timed out")
+            continue
+        out, err = proc.stdout or "", proc.stderr or ""
+
+        # Order matters. _mutant_diff.py returns 2 for CONTROL FAILED and for an
+        # uncollectable node, so the rc check would swallow the much more specific
+        # CONTROL FAILED diagnostic. Test the specific conditions first.
+        #
+        # "no mutant named" is a SystemExit from _mutant_diff.find(), and it lands on
+        # stderr. pytest's "ERROR: not found:" for a bad node id does NOT -- _Run takes
+        # `(proc.stdout or proc.stderr)` and pytest -q still writes a newline to stdout,
+        # so the stderr text is dropped before it ever reaches us. That is why the
+        # missing verdict marker below is the real backstop for a bad node id.
+        if "no mutant named" in err:
+            failures.append(f"{mutant}: no such mutant -- the result below is meaningless")
+            print(f"!! {mutant:48s} no such mutant")
+            continue
         if "CONTROL FAILED" in out:
             failures.append(f"{mutant}: CONTROL FAILED -- the result means nothing")
             print(f"!! {mutant:48s} control failed")
+            continue
+        # Every verdict _mutant_diff can reach carries one of these markers. Their
+        # absence means it exited early (bad node id, SystemExit, crash), which is
+        # NOT the same as "survived". Without this, an EXPECT_SURVIVE entry with a
+        # typo'd name reports PASS forever.
+        if "KILLED" not in out and "SURVIVED" not in out:
+            failures.append(f"{mutant}: harness produced no verdict (rc={proc.returncode})"
+                            f" -- treat as unverified, not a survive")
+            print(f"!! {mutant:48s} no verdict (rc={proc.returncode})")
+            continue
+        if proc.returncode not in (0, 1):
+            failures.append(f"{mutant}: harness exited {proc.returncode}, "
+                            f"expected 0 (killed) or 1 (survived)")
+            print(f"!! {mutant:48s} harness error rc={proc.returncode}")
             continue
         killed = "KILLED" in out
         want = mutant not in EXPECT_SURVIVE

@@ -505,11 +505,20 @@ class TestReadOnlyPolicyTransformsEveryRule:
     """
 
     def test_every_rule_but_the_query_is_demoted(self):
-        """`policy.x_read_only_policy__mutmut_5`: `continue` -> `break`.
+        """`policy.x_read_only_policy__mutmut_5`: `continue` -> `break`. NOT killed.
 
-        `allow.query` is the *last* rule in `default_policy()`, so `break` on the first
-        non-query rule leaves every rule after `deny.drop` at its default DENY verdict.
-        Five of the ten rules stay DENY.
+        This mutant is genuinely EQUIVALENT, and the test does not kill it — an earlier
+        version of this docstring claimed otherwise, and claimed a specific wrong
+        consequence ("five of the ten rules stay DENY"). Zero do.
+
+        `allow.query` is the *last* rule in `default_policy()` (index 9 of 10), so the
+        loop never reaches a `break` before it ends: `break` and `continue` exit at the
+        same point. Verified by running the mutant with a passing control; it SURVIVES.
+        See `test_mutation_survivors.SURVIVORS_NOT_COVERED`, which records this
+        correctly.
+
+        The test stays because the property is real and worth pinning: under the original
+        implementation every rule except the query one must be demoted to UNKNOWN.
         """
         for rule in read_only_policy().rules:
             if rule.id == "allow.query":
@@ -595,12 +604,22 @@ class TestNamespacePatternMatching:
     def test_backquoted_components_resolve_and_are_marked_quoted(
         self, spec_key, sql, name, quoted
     ):
-        """`treewalk.x__parts__mutmut_13/14/15`: `BackQuotedIdentifierContext` mangled.
+        """`treewalk.x__parts__mutmut_13/14/15`: does NOT kill these. Dead class names.
 
-        Backquoting is the documented way an identifier that is not what it looks like
-        gets into the tree. If the class name stops matching, `` `prod`.`users` `` stops
-        resolving at all and the DROP is reported against no namespace -- so a readable
-        or writable allowlist has nothing to check, and the write screens clean.
+        An earlier version of this docstring claimed these three. They SURVIVE this test
+        with a passing control, and the correct disposition is already recorded in
+        `test_mutation_survivors.SURVIVORS_NOT_COVERED`: `BackQuotedIdentifierContext`
+        is emitted by neither pinned grammar, so mangling that literal changes nothing.
+
+        Verified by walking every node of `DROP TABLE `prod`.`users`` under both grammars:
+        the identifier classes are QuotedIdentifierContext,
+        QuotedIdentifierAlternativeContext, MultipartIdentifierContext, IdentifierContext,
+        IdentifierReferenceContext and ErrorCapturingIdentifierContext -- and no
+        BackQuotedIdentifierContext among them.
+
+        The test stays because the property is real and worth pinning: backquoting is the
+        documented way an identifier that is not what it looks like reaches the tree, and
+        this is what proves `` `prod`.`users` `` resolves *and* stays marked quoted.
         """
         parser = get_parser(spec_key)
         tree = parser.parse(sql).statements[0].tree

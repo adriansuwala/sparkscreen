@@ -733,7 +733,25 @@ SURVIVORS_NOT_COVERED = {
     "policy.x_default_policy__mutmut_340": "Policy(rules=rules) names itself 'default'.",
     # -- cosmetic by the project's own rule: message wording only.
     "screen.x__eval_write__mutmut_48/49": "note text; a DENY finding is still a DENY.",
-    "screen.x__eval_one__mutmut_21/22/23": "wording of the unsupported-statement note.",
+    # -- UNREACHABLE, not cosmetic. `_eval_one` mutants 21/22/23 sit on the
+    #    `if not findings:` arm of screen._eval_one, which mangles verdict/reason/message
+    #    to None. An earlier version of this entry called them "wording of the
+    #    unsupported-statement note", which was wrong: 21 is `verdict=None` and 22 is
+    #    `reason=None`, the same type-violation as the pair below, with no wording to
+    #    pin.
+    #
+    #    They survive because the arm is DEAD, not because the damage is cosmetic.
+    #    `Policy.evaluate_statement` returns non-empty on every path (both limit early
+    #    returns, the no-positive-rule early return, and the trailing append), checked
+    #    over the full label universe (114 labels: labels_for_grammar('spark-4.0') |
+    #    labels_for_grammar('spark-3.5.1')) x 4 policy shapes (default, zero rules, a
+    #    rule matching one label only, read_only) x 4 input shapes, plus a
+    #    zero-limits policy to reach both limit early returns -- 2280 calls, zero empty.
+    #    So no input reaches it. The dead branch itself is arguably the finding: a
+    #    fallback that cannot fire is a fallback nobody has tested.
+    "screen.x__eval_one__mutmut_21/22/23":
+        "unreachable: `if not findings:` in _eval_one is dead; evaluate_statement "
+        "never returns an empty list.",
     # -- equivalent: `getattr(x, "children", []) or []` and `getattr(x, "children", None)
     #    or []` agree for every input, since `children` is a list or absent.
     "treewalk (11 survivors)": "the `getattr(node, 'children', ...)` default variants.",
