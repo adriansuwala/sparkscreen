@@ -170,7 +170,7 @@ def test_parse_rejects_non_string_input(bad):
     `SqlSyntaxError` contract should not have a hole for the wrong type.
     """
     with pytest.raises(SqlSyntaxError):
-        SqlParser("spark-4.0").parse(bad)
+        SqlParser("spark-4.2").parse(bad)
 
 
 @given(key=st.sampled_from(KEYS), text=st.text(alphabet=string.printable, max_size=50))
@@ -319,7 +319,7 @@ def test_lexer_state_does_not_leak_between_parses(key, sql):
     assert parser.parse(sql).label == parser.parse(sql).label
 
 
-@given(key=st.sampled_from(["spark-4.0"]), sql=_SQL_TEXT)
+@given(key=st.sampled_from(["spark-4.2"]), sql=_SQL_TEXT)
 def test_script_flattening_yields_all_statements(key, sql):
     """PROPERTY: a BEGIN...END script yields one statement per inner statement.
 
@@ -327,7 +327,7 @@ def test_script_flattening_yields_all_statements(key, sql):
     re-point at inner subtrees. A bug there hands the policy layer a context whose
     label and subtree disagree -- the exact confusion `_tighten` exists to prevent.
 
-    Scoped to spark-4.0: `BEGIN...END` scripts are a 4.0 addition, and 3.5.1
+    Scoped to spark-4.2: `BEGIN...END` scripts are a 4.0 addition, and 3.5.1
     correctly rejects them (there is no `compoundOrSingleStatement` rule to reach).
 
     Compares the *flattened* labels rather than `ParsedStatement.label`. A bare DML
@@ -385,8 +385,8 @@ def test_set_inside_a_script_is_matched_by_the_same_policy_rule(sql):
         screen('import pyspark\\nspark.sql("BEGIN set spark.sql.shuffle.partitions=200; END")\\n')
         #   -> unknown unsupported_statement None SetVariableInsideSqlScript
     """
-    bare = screen(f'import pyspark\nspark.sql("{sql}")\n', spec="spark-4.0")
-    wrapped = screen(f'import pyspark\nspark.sql("BEGIN {sql}; END")\n', spec="spark-4.0")
+    bare = screen(f'import pyspark\nspark.sql("{sql}")\n', spec="spark-4.2")
+    wrapped = screen(f'import pyspark\nspark.sql("BEGIN {sql}; END")\n', spec="spark-4.2")
     bare_rules = {f.rule for f in bare.findings}
     wrapped_rules = {f.rule for f in wrapped.findings}
     assert bare_rules == wrapped_rules, (
@@ -407,8 +407,8 @@ def test_begin_end_never_turns_a_deny_into_an_allow(sql):
     so it is allowed here. Only ALLOW is forbidden, because that is the one verdict
     that tells the caller nobody looked.
     """
-    bare = screen(f'import pyspark\nspark.sql("{sql}")\n', spec="spark-4.0")
-    wrapped = screen(f'import pyspark\nspark.sql("BEGIN {sql}; END")\n', spec="spark-4.0")
+    bare = screen(f'import pyspark\nspark.sql("{sql}")\n', spec="spark-4.2")
+    wrapped = screen(f'import pyspark\nspark.sql("BEGIN {sql}; END")\n', spec="spark-4.2")
     if bare.verdict is Verdict.DENY:
         assert wrapped.verdict is not Verdict.ALLOW, (
             f"BEGIN...END turned a DENY into an ALLOW for {sql!r}: {wrapped.summary()}"

@@ -236,9 +236,15 @@ def test_both_grammars_agree_on_labels(spec_key):
         assert all(a != b for a, b in differing.values()), differing
 
 def test_version_specific_statements(spec_key):
-    """Some statements only exist in one pinned grammar; assert the right one accepts."""
+    """Some statements exist only in some pinned grammars; assert each accepts or rejects.
+
+    Three grammars, so the split is no longer "4.x vs 3.5.1". `CALL` and the single-char
+    pipe operator arrived in 4.0 and are in both 4.x lines. `QUALIFY` arrived in 4.2 and
+    is the case that makes this test three-way: accepting it on 4.1 would be a false
+    negative, since a real 4.1 engine refuses it.
+    """
     parser = get_parser(spec_key)
-    if spec_key == "spark-4.0":
+    if spec_key.startswith("spark-4"):
         assert parser.parse("call sys.system_info()")
         # single-char pipe operator was added after 3.5
         assert parser.parse("SELECT 1 |> SELECT 2")
@@ -248,3 +254,11 @@ def test_version_specific_statements(spec_key):
             parser.parse("call sys.system_info()")
         with pytest.raises(SqlSyntaxError):
             parser.parse("SELECT 1 |> SELECT 2")
+
+    # 4.2-only: QUALIFY. 4.1 and 3.5.1 must reject it, and that rejection is the point.
+    qualify = "SELECT a FROM t QUALIFY ROW_NUMBER() OVER (ORDER BY a) = 1"
+    if spec_key == "spark-4.2":
+        assert parser.parse(qualify)
+    else:
+        with pytest.raises(SqlSyntaxError):
+            parser.parse(qualify)

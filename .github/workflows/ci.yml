@@ -138,12 +138,12 @@ jobs:
 
           # The other half of the same contract: if the generated parsers were missing,
           # "no JVM needed" would be true only because nothing could parse anything.
-          for spec in ("spark_3_5_1", "spark_4_0"):
+          for spec in ("spark_3_5_1", "spark_4_1", "spark_4_2"):
               for mod in ("SqlBaseLexer.py", "SqlBaseParser.py"):
                   path = f"sparkscreen/grammar/generated/{spec}/{mod}"
                   assert path in names, f"{path} missing from the wheel"
 
-          print(f"wheel contents ok: {len(names)} entries, no .g4, no .jar, both parsers present")
+          print(f"wheel contents ok: {len(names)} entries, no .g4, no .jar, all three parsers present")
           PY
 
       - name: Install the wheel into a clean environment
@@ -179,7 +179,7 @@ jobs:
           # Prove the committed parser actually loaded and parsed, rather than the
           # verdict happening to come from somewhere else.
           from sparkscreen.grammar.parser import get_parser
-          for key in ("spark-4.0", "spark-3.5.1"):
+          for key in ("spark-4.2", "spark-4.1", "spark-3.5.1"):
               assert get_parser(key).parse("select 1"), key
 
           print("wheel ok with no JVM:", sparkscreen.__version__)

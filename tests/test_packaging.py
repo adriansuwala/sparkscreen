@@ -112,7 +112,7 @@ class TestWheelContents:
         import zipfile
 
         names = zipfile.ZipFile(built_wheel).namelist()
-        for spec in ("spark_3_5_1", "spark_4_0"):
+        for spec in ("spark_3_5_1", "spark_4_2"):
             lexer = f"sparkscreen/grammar/generated/{spec}/SqlBaseLexer.py"
             parser = f"sparkscreen/grammar/generated/{spec}/SqlBaseParser.py"
             assert lexer in names, f"{lexer} missing from the wheel"

@@ -6,17 +6,21 @@ So the set itself has to be derived mechanically, not from a SQL corpus.
 
 A corpus is not sufficient on its own, and this is the reason: a corpus can only
 demonstrate the labels you thought to write SQL for. `CreatePipelineDataset` and
-`CreateFlowAutoCdc` are real, reachable top-level statements in spark-4.0 that no
-hand-written corpus would stumble into, and a coverage test built on a corpus would
-happily pass with both of them unmapped. The generated parser classes, by contrast,
+`CreateFlowAutoCdc` were real, reachable top-level statements in the post-4.2 master
+grammar this module was written against -- that snapshot is gone now (F17 re-pinned the
+4.x lines to the actual 4.1 and 4.2 releases, and neither construct appears in either),
+but they are the standing example of why a corpus cannot stand in for a derivation. The
+argument does not depend on those two labels still existing: any label reachable only
+through a rule the corpus never fires is invisible to a corpus-based coverage test, and
+that test would pass with it unmapped. The generated parser classes, by contrast,
 already contain the complete answer: ANTLR emits one `<Label>Context` class per
 labeled alternative of every rule, and inheritance encodes which rule each belongs to.
 
 ## The derivation
 
 1. **Entry shapes.** `top_level_statement_contexts` (in `treewalk`) can yield contexts
-   under exactly three holders: `SingleStatementContext` (both grammars),
-   `CompoundBodyContext` and `CompoundStatementContext` (4.0's BEGIN...END scripts).
+   under exactly three holders: `SingleStatementContext` (all grammars),
+   `CompoundBodyContext` and `CompoundStatementContext` (the 4.x BEGIN...END scripts).
    Starting anywhere else would collect labels that can never reach a policy.
 
 2. **Labeled alternatives of a rule** are the direct subclasses of that rule's

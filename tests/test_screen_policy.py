@@ -340,7 +340,7 @@ class TestUnknownVerdicts:
         assert "AlterTableCollation" in DESTRUCTIVE_LABELS
 
     def test_call_procedure_needs_review(self, spec_key):
-        """`CALL p()` is recognised as Call on spark-4.0.
+        """`CALL p()` is recognised as Call on spark-4.2.
 
         On spark-3.5.1 the pinned grammar rejects it, so it still fails closed
         via UNPARSEABLE_SQL. Both paths are UNKNOWN; only the reason differs.
@@ -1015,7 +1015,7 @@ class TestCliExitCodes:
     def test_list_grammars(self, tmp_path):
         code, out, _ = run_cli("--list-grammars", "ignored")
         assert code == 0
-        assert "spark-4.0" in out and "spark-3.5.1" in out
+        assert "spark-4.2" in out and "spark-3.5.1" in out
 
     def test_json_output_is_valid_json_with_verdict_key(self, tmp_path):
         path = write(tmp_path, "drop.py", sql_call("DROP TABLE prod.users"))
@@ -1092,7 +1092,7 @@ class TestCliExitCodes:
         code, out, err = run_cli(path, "--spark", "9.9.9", "--no-color")
         assert code == EXIT_UNKNOWN
         assert "unknown Spark version" in err
-        assert "spark-4.0" in err
+        assert "spark-4.2" in err
         assert out == ""
 
     def test_grammar_key_is_accepted(self, tmp_path):

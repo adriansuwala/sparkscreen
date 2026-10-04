@@ -33,7 +33,7 @@ _GRAMMAR_BASE = (
 class GrammarSpec:
     """One supported Spark line, pinned to a commit."""
 
-    #: Public name used in config, e.g. "spark-4.0" or "spark-3.5.1"
+    #: Public name used in config, e.g. "spark-4.2" or "spark-3.5.1"
     key: str
     #: Exact Spark commit the grammar was taken from. Authoritative.
     commit: str
@@ -50,7 +50,7 @@ class GrammarSpec:
     def module_name(self) -> str:
         """Importable package name for the generated parser.
 
-        Grammar keys contain dots ("spark-4.0") which are illegal in Python module
+        Grammar keys contain dots ("spark-4.2") which are illegal in Python module
         names, so the on-disk directory and import path use underscores.
         """
         return self.key.replace("-", "_").replace(".", "_")
@@ -67,9 +67,9 @@ class GrammarSpec:
     def python_module(self, name: str) -> str:
         """Fully-qualified module name for a generated parser module.
 
-        Uses `module_name`, not `key`: the public key is "spark-4.0", which contains a
+        Uses `module_name`, not `key`: the public key is "spark-4.2", which contains a
         dot and is not an importable package name. The generated directories are
-        "spark_4_0".
+        "spark_4_2".
         """
         return f"sparkscreen.grammar.generated.{self.module_name}.{name}"
 
@@ -80,28 +80,47 @@ class GrammarSpec:
 # Every `commit` MUST be a full 40-character SHA of an immutable Spark commit.
 # This is a supply-chain property, not a style preference: a moving ref -- a branch, or
 # even a tag, which can be re-pointed -- means the grammar that gets parsed with can
-# change under a released version of this package, and the two grammars do not agree
-# (`spark-4.0` accepts `CALL` and `|>`; `spark-3.5.1` rejects them). Two of these were
-# originally a short SHA and a bare `v3.5.1` tag; tests/test_grammar_port.py now
-# enforces the full-SHA invariant so that cannot regress.
+# change under a released version of this package, and the grammars do not agree
+# (`spark-4.2` accepts `QUALIFY`; `spark-4.1` rejects it). Two pins were originally a
+# short SHA and a bare `v3.5.1` tag; tests/test_grammar_port.py now enforces the
+# full-SHA invariant so that cannot regress.
 #
-# spark-4.0  : grammar as of 2026-08-03. Largest surface: dollar-quoted strings,
-#              STRUCT<..> type-level counting, single-char pipe operators, CALL,
-#              BEGIN...END scripts, 24 embedded Java constructs.
+# A pin must be the release it names, not a later master snapshot. The former `spark-4.2`
+# spec declared `spark_versions=("4.0.0", "5.0.0")` while pinning a commit dated three
+# weeks *after* the 4.2.0 release, so the grammar was 4.2-shaped under a 4.0 name and
+# silently accepted syntax no 4.0 engine runs (F17). `tests/test_grammar_pin_identity.py`
+# now asserts each pin's grammar is a subset of its own release and a superset of the
+# line below it, so a master snapshot cannot be filed under an older name again.
+#
+# spark-4.2  : release v4.2.0. Adds QUALIFY, CHANGES, APPROX/EXACT NEAREST, and splits
+#              4.1's `insertIntoReplaceWhere` into `insertIntoReplaceBooleanCond` +
+#              `insertIntoReplaceUsing`.
+# spark-4.1  : release v4.1.3. Adds PRIMARY KEY / FOREIGN KEY constraints, WINDOW,
+#              TABLESAMPLE, CREATE STREAMING TABLE. Rejects every 4.2 construct above.
 # spark-3.5.1: release v3.5.1. Older and much smaller grammar (1875 parser lines),
 #              6 embedded Java constructs, no dollar-quoting, pipe operators, CALL,
 #              or scripts.
 #
-# Both are generated with ANTLR 4.13.1 even though Spark 3.5.1 pins 4.9.3:
+# All are generated with ANTLR 4.13.1 even though Spark 3.5.1 pins 4.9.3:
 # 4.9.3 rejects that grammar for the Python target (labels `from=`, `input=`,
 # `property=` collide with Python runtime attribute names), 4.13.1 accepts it.
+#
+# `spark-4.2` was removed rather than kept as an alias: upstream 4.0 support ended
+# 2026-11-23, it was 4.1% of downloads, and keeping a key whose grammar was never 4.0's
+# is the F17 defect in a different coat. This is a pre-1.0 break; see F17.
 # ---------------------------------------------------------------------------
 
 SPECS: tuple[GrammarSpec, ...] = (
     GrammarSpec(
-        key="spark-4.0",
-        commit="3c28a9c093f1026d76e53d3eb2b846ffb28465c8",
-        spark_versions=("4.0.0", "5.0.0"),
+        key="spark-4.2",
+        commit="32f7299601108917fb01920a54e084595b7b3bf8",
+        spark_versions=("4.2.0",),
+        antlr_version="4.13.1",
+    ),
+    GrammarSpec(
+        key="spark-4.1",
+        commit="77bbf77e86ad48f58b5dfbc6ac882b3e70cf1989",
+        spark_versions=("4.1.0", "4.1.1", "4.1.2", "4.1.3"),
         antlr_version="4.13.1",
     ),
     GrammarSpec(
@@ -112,7 +131,7 @@ SPECS: tuple[GrammarSpec, ...] = (
     ),
 )
 
-DEFAULT_SPEC_KEY = "spark-4.0"
+DEFAULT_SPEC_KEY = "spark-4.2"
 
 
 def get_spec(key: str | None = None) -> GrammarSpec:
@@ -125,13 +144,22 @@ def get_spec(key: str | None = None) -> GrammarSpec:
 
 
 def spec_for_spark_version(version: str) -> GrammarSpec:
-    """Pick the grammar for a Spark version like '3.5.1', '4.0.0', or '4.0'.
+    """Pick the grammar for a Spark version like '4.1', '4.1.3', or '3.5.1'.
 
-    Matching is exact first, then falls back to a major.minor prefix, because Spark
-    versions get written both ways in practice ('4.0' as well as '4.0.0') and the
-    grammar we ship is a single pinned commit per line rather than one per patch
-    release. The prefix match is deliberately restricted to two components so that
-    '3.5' cannot silently select a 3.5.1-specific grammar as if it were 3.5.0.
+    Matching is exact first, then a major.minor prefix. The prefix fallback exists because
+    Spark versions get written both ways in practice ('4.1' as well as '4.1.3'), and each
+    line ships one pinned commit rather than one per patch release. It is deliberately
+    restricted to two components so that '3.5' cannot silently select a 3.5.1-specific
+    grammar as if it were 3.5.0.
+
+    Every patch release of a supported line is listed explicitly in `spark_versions`, so a
+    version like '4.1.3' matches exactly and does not depend on the prefix rule. A line
+    gains a new entry when upstream ships a new patch, which is a deliberate edit rather
+    than something that drifts.
+
+    An unsupported version raises. It must not fall through to the newest grammar: a user
+    on 4.0 asking for their own version would otherwise be screened by 4.2 syntax, which
+    is the F17 failure. The error names what is supported so the fix is obvious.
     """
     norm = version.strip().lstrip("vV")
     for s in SPECS:

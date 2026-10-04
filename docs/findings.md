@@ -540,6 +540,42 @@ any release, in which case the grammar would quietly become 4.2-shaped and the p
 move to the 4.2.0 tag instead. The finding is about the mislabelling, not about the
 grammar being wrong.
 
+### F17 resolution
+
+The `spark-4.0` key is gone rather than renamed, and the 4.x line is now pinned to two real
+releases instead of one master snapshot:
+
+| key | commit | release | date |
+|---|---|---|---|
+| `spark-4.2` | `32f7299601108917fb01920a54e084595b7b3bf8` | v4.2.0 | 2026-07-11 |
+| `spark-4.1` | `77bbf77e86ad48f58b5dfbc6ac882b3e70cf1989` | v4.1.3 | 2026-07-11 |
+| `spark-3.5.1` | `fd86f85e181fc2dc0f50a096855acf83a6cc5d9c` | v3.5.1 | unchanged |
+
+Both new SHAs were resolved through the GitHub API and confirmed to be the release
+commits ("Preparing Spark release v4.1.3-rc1", "v4.2.0-rc6"), and all four vendored `.g4`
+files hash byte-identical to the upstream release grammars.
+
+Splitting rather than sharing was chosen on measurement, not taste. The cost of a second
+grammar turns out to be near zero where it hurts and real only in bytes:
+
+- **Effect table: no new entries.** The 4.2 label universe (111) is a subset of the old
+  113, and 4.1's one extra label, `InsertIntoReplaceWhere`, was already mapped at
+  `effects.py:171`. Zero uncovered labels across all three grammars.
+- **Wheel: +139 KB**, 509 KB to 648 KB. Sharing would have saved that and cost a false
+  negative on every 4.1 cluster.
+- **The `.g4` files are 98.8% identical** but split into 85 diff hunks spread from line 56
+  to line 2,657, so a shared-base scheme would need 85 hand-maintained splice points and
+  would no longer correspond to any upstream commit -- losing the SHA-pin property that is
+  the reason for vendoring verbatim.
+
+Two labels, `CreateFlowAutoCdc` and `CommentColumn`, became unreachable when the master
+snapshot was dropped. They are now in the documented policy-only drift set rather than
+pruned, because pruning the effect table is a policy decision and not this module's.
+
+`spec_for_spark_version` raises for an unsupported version rather than falling through to
+the newest grammar: a 4.0 user asking for their own version must not be handed 4.2 syntax,
+which is this same finding wearing a different hat.
+
 ## F18 — 4.1 and 4.2 grammars diverge in six user-facing features
 
 The plan was to share one grammar between 4.1 and 4.2 on the bet that they do not diverge.

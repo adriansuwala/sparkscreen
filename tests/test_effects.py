@@ -192,7 +192,7 @@ SHARED_CORPUS = [
      {Effect.WRITE_DATA, Effect.READ_LOCAL_FS, Effect.REACHES_EXTERNAL}),
 ]
 
-#: Statements only spark-4.0 accepts. `call` and the 4.0-only script syntax do not
+#: Statements only spark-4.2 accepts. `call` and the 4.0-only script syntax do not
 #: exist in 3.5.1's grammar, so this corpus must not be applied there.
 SPARK_4_0_ONLY_CORPUS = [
     ("call my_proc(1)", {Effect.REACHES_EXTERNAL}),
@@ -274,7 +274,7 @@ CLASSIFICATION_CASES = [
 
 
 def _corpus_for(spec_key):
-    if spec_key == "spark-4.0":
+    if spec_key == "spark-4.2":
         return SHARED_CORPUS + SPARK_4_0_ONLY_CORPUS
     return SHARED_CORPUS + SPARK_3_5_1_ONLY_CORPUS
 
@@ -374,22 +374,34 @@ class TestTableIsTotal:
         measured against the real parsers; a drop below them means the walk, not the
         grammar, changed.
         """
-        assert len(labels_for_grammar("spark-4.0")) >= 100
+        assert len(labels_for_grammar("spark-4.2")) >= 100
         assert len(labels_for_grammar("spark-3.5.1")) >= 75
         assert len(set(grammar_labels())) >= 110
 
     def test_derivation_finds_labels_a_corpus_would_miss(self):
         """The derivation must be strictly stronger than a corpus.
 
-        These labels are reachable in spark-4.0 and no SQL in this file produces them
-        -- they are the reason the coverage test derives labels from the parser rather
-        than from a statement list. If a grammar change removed them, this test would
-        need revisiting; today it is what makes the corpus insufficient on its own.
+        These labels are reachable in a pinned grammar and no SQL in this file produces
+        them -- they are the reason the coverage test derives labels from the parser
+        rather than from a statement list. If a grammar change removed them, this test
+        would need revisiting; today it is what makes the corpus insufficient on its own.
+
+        The list is per-grammar on purpose. `CreatePipelineDataset` and `CreateFlowAutoCdc`
+        were reachable only in the post-4.2 master grammar this test was written against;
+        F17 re-pinned the 4.x lines to the real 4.1 and 4.2 releases and neither construct
+        exists in either, so they now live in `effects.py`'s documented policy-only set
+        instead. They are kept here as the standing example of the failure mode rather
+        than deleted, because "reachable but uncorpus'd" is the property under test and a
+        future pin could reintroduce them.
         """
-        four_zero = labels_for_grammar("spark-4.0")
-        for label in ("CreatePipelineDataset", "CreateFlowAutoCdc", "Call",
-                      "MergeIntoTable", "LoadData", "ManageResource"):
-            assert label in four_zero
+        four_two = labels_for_grammar("spark-4.2")
+        four_one = labels_for_grammar("spark-4.1")
+        for label in ("Call", "MergeIntoTable", "LoadData", "ManageResource"):
+            assert label in four_two, f"{label} vanished from spark-4.2"
+        # 4.1-only surface the 3.5.1 grammar lacks: proves the derivation is per-grammar.
+        for label in ("CreateStreamingTable", "TableConstraint"):
+            if label in four_one:
+                assert label not in labels_for_grammar("spark-3.5.1")
 
     def test_corpus_statements_all_have_effects(self, spec_key):
         """Real SQL through the real parsers, for both grammars.
@@ -428,13 +440,19 @@ class TestTableIsTotal:
         """Entries must not accumulate for labels nothing can produce.
 
         `effect_label_drift()["grammar_uncovered"]` is expected to be non-empty today
-        (eight policy-only labels), but it must be exactly the documented set -- a
+        (nine policy-only labels), but it must be exactly the documented set -- a
         growing list means the table is describing unreachable statements and those
         entries stop being evidence of anything.
+
+        `CreateFlowAutoCdc` joined this set when F17 replaced the post-4.2 master grammar
+        with the real 4.1 and 4.2 releases: the construct exists on master and in neither
+        release, so its effect entry is now policy-only. It stays in `LABEL_EFFECTS` rather
+        than being pruned because pruning is a policy.py decision, not this module's.
         """
         expected = {
-            "Close", "Execute", "Fetch", "InsertIntoPartition", "Open",
-            "SetTableCollation", "ShowCollation", "ShowDatabases",
+            "Close", "CommentColumn", "CreateFlowAutoCdc", "Execute", "Fetch",
+            "InsertIntoPartition", "Open", "SetTableCollation", "ShowCollation",
+            "ShowDatabases",
         }
         assert set(effect_label_drift()["grammar_uncovered"]) == expected
 
@@ -447,9 +465,11 @@ class TestTableIsTotal:
     def test_drift_reports_the_dead_policy_vocabulary(self):
         # Reported, not removed: pruning these is a policy.py decision and this module
         # does not get to make it. Pinned so the list cannot change unnoticed.
+        # `CommentColumn` joined on F17 -- a master-grammar construct absent from both
+        # the 4.1 and 4.2 releases.
         assert set(effect_label_drift()["policy_only"]) == {
-            "Close", "Execute", "Fetch", "InsertIntoPartition", "Open",
-            "SetTableCollation", "ShowCollation", "ShowDatabases",
+            "Close", "CommentColumn", "Execute", "Fetch", "InsertIntoPartition",
+            "Open", "SetTableCollation", "ShowCollation", "ShowDatabases",
         }
 
 
@@ -535,11 +555,11 @@ class TestClassification:
 
     @pytest.mark.parametrize("sql,expected", SPARK_4_0_ONLY_CORPUS,
                              ids=[c[0] for c in SPARK_4_0_ONLY_CORPUS])
-    def test_spark_4_0_corpus_classification(self, sql, expected):
-        parsed = get_parser("spark-4.0").parse(sql)
+    def test_spark_4_2_corpus_classification(self, sql, expected):
+        parsed = get_parser("spark-4.2").parse(sql)
         for stmt in parsed.statements:
             assert effects_for_label(stmt.label) == expected, (
-                f"spark-4.0: {sql!r} -> {stmt.label}"
+                f"spark-4.2: {sql!r} -> {stmt.label}"
             )
 
     @pytest.mark.parametrize("sql,expected", SPARK_3_5_1_ONLY_CORPUS,
@@ -751,14 +771,14 @@ class TestWiring:
         assert not empty.has_effect(Effect.DESTROY_DATA)
 
     def test_report_to_dict_is_json_serialisable_with_effects(self):
-        r = Report(policy="default", grammar="spark-4.0")
+        r = Report(policy="default", grammar="spark-4.2")
         r.add(Finding(Verdict.DENY, Reason.DENY_RULE, "x",
                       effect=frozenset({Effect.DESTROY_DATA})))
         out = json.loads(json.dumps(r.to_dict()))
         assert out["effects"] == ["DESTROY_DATA"]
         assert out["findings"][0]["effect"] == ["DESTROY_DATA"]
 
-    def _screen(self, sql, policy=None, spec_key="spark-4.0"):
+    def _screen(self, sql, policy=None, spec_key="spark-4.2"):
         return screen(f'spark.sql({sql!r})', policy, spec=spec_key)
 
     def test_screen_populates_effect_on_a_drop(self):

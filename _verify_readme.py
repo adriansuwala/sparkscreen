@@ -137,8 +137,8 @@ df.write.mode("overwrite").saveAsTable("prod.events_v2")
 
     # --- grammars ---
     from sparkscreen.grammar.spec import SPECS
-    check("both grammars present",
-          sorted(s.key for s in SPECS), ["spark-3.5.1", "spark-4.0"])
+    check("all three grammars present",
+          sorted(s.key for s in SPECS), ["spark-3.5.1", "spark-4.1", "spark-4.2"])
     spec_src = (ROOT / "src/sparkscreen/grammar/spec.py").read_text()
     shas = re.findall(r'"([0-9a-f]{7,40})"', spec_src)
     check("every pin is a full 40-char commit",

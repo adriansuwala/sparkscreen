@@ -128,7 +128,7 @@ MUST_NOT_ALLOW = [
 
 
 @pytest.mark.parametrize("source", MUST_NOT_ALLOW)
-@pytest.mark.parametrize("spec_key", ["spark-4.0", "spark-3.5.1"])
+@pytest.mark.parametrize("spec_key", ["spark-4.2", "spark-3.5.1"])
 def test_never_allows_dangerous_or_unanalyzable(spec_key, source):
     report = screen(source, spec=spec_key)
     assert not report.ok, (

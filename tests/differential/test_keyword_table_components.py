@@ -154,7 +154,7 @@ def test_we_extract_exactly_what_spark_resolves(spark):
     from sparkscreen.analysis.treewalk import extract_namespaces
     from sparkscreen.grammar.parser import get_parser
 
-    key = "spark-3.5.1" if pyspark.__version__.startswith("3.5") else "spark-4.0"
+    key = "spark-3.5.1" if pyspark.__version__.startswith("3.5") else "spark-4.2"
 
     def ours(sql: str) -> list[str]:
         tree = get_parser(key).parse(sql).statements[0].tree
@@ -188,7 +188,7 @@ def test_a_broader_allowlist_name_can_no_longer_be_produced(spark):
     from sparkscreen.analysis.treewalk import extract_namespaces
     from sparkscreen.grammar.parser import get_parser
 
-    key = "spark-3.5.1" if pyspark.__version__.startswith("3.5") else "spark-4.0"
+    key = "spark-3.5.1" if pyspark.__version__.startswith("3.5") else "spark-4.2"
     tree = get_parser(key).parse("select * from prod.staging.x").statements[0].tree
     (ref,) = extract_namespaces(tree, grammar_key=key)
 

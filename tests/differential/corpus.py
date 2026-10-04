@@ -65,8 +65,8 @@ CORPUS: tuple[tuple[str, bool], ...] = (
 #: from CORPUS because a single boolean cannot describe them.
 VERSION_SPECIFIC: tuple[tuple[str, str, bool], ...] = (
     # (sql, grammar_key_that_accepts_it, observed)
-    ("SELECT 1 |> SELECT 2", "spark-4.0", True),
-    ("BEGIN DROP TABLE a; DROP VIEW b; END", "spark-4.0", True),
+    ("SELECT 1 |> SELECT 2", "spark-4.2", True),
+    ("BEGIN DROP TABLE a; DROP VIEW b; END", "spark-4.2", True),
 )
 
 #: And the ones the older grammar must reject.

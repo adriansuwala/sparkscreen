@@ -37,14 +37,15 @@ because they are the highest-yield thing to know before writing tests here.
 
 ### 1. Never write one corpus and apply it to two grammars
 
-`tests/conftest.py` provides a `spec_key` fixture that parametrizes over both pinned
-grammars, and it will happily run a 4.0-only statement against 3.5.1:
+`tests/conftest.py` provides a `spec_key` fixture that parametrizes over all three pinned
+grammars, and it will happily run a 4.2-only statement against 4.1:
 
 ```
-$$abc$$                codeLiteral in 4.0, syntax error in 3.5.1
-CALL sys.system_info()  4.0 only
-SELECT 1 |> SELECT 2    4.0 only (pipe operator)
-BEGIN ... END           4.0 only (script)
+$$abc$$                codeLiteral on 4.x, syntax error in 3.5.1
+CALL sys.system_info()  4.x only
+SELECT 1 |> SELECT 2    4.x only (pipe operator)
+BEGIN ... END           4.x only (script)
+SELECT ... QUALIFY ...  4.2 ONLY -- 4.1 and 3.5.1 reject it
 ```
 
 Version-specific statements belong in `VERSION_SPECIFIC` / `VERSION_SPECIFIC_REJECTED` in
@@ -52,7 +53,7 @@ Version-specific statements belong in `VERSION_SPECIFIC` / `VERSION_SPECIFIC_REJ
 
 ### 2. Write SQL in lowercase
 
-The original suite was 100% uppercase and passed 100% while both grammars rejected
+The original suite was 100% uppercase and passed 100% while every grammar rejected
 `select 1`. Real agent-written code is lowercase; real Spark accepts lowercase. An
 all-uppercase corpus has a blind spot you cannot see.
 
@@ -71,7 +72,7 @@ path, not merely present on the malicious one.
 
 The codebase contains decisions that read as mistakes. They are not.
 
-- **Both grammars use ANTLR 4.13.1, even though 3.5.1 pins 4.9.3.** 4.9.3 cannot build its
+- **All three grammars use ANTLR 4.13.1, even though 3.5.1 pins 4.9.3.** 4.9.3 cannot build its
   own grammar for the Python target — labels `from=`, `input=`, `property=` collide with
   Python runtime attributes. See [D7](decisions.md#d7--one-antlr-version-for-both-grammars).
 - **The vendored `.g4` files are Apache-2.0 and are committed.** That is deliberate:
@@ -113,7 +114,7 @@ The bar this repo holds itself to, from things that were believed and turned out
 
 - "the wheel works" → install it in a clean venv and run it with `java` absent from
   `PATH`
-- "both grammars agree" → run it against both `spec_key` values
+- "the grammars agree" → run it against every `spec_key` value (there are three)
 - "it matches Spark" → run the differential suite against a live session
 - "the table is complete" → enumerate the grammar's labels empirically rather than
   asserting against a hand-written list

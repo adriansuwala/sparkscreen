@@ -67,7 +67,7 @@ def _our_verdict(spec_key: str, sql: str) -> bool:
 
 def _running_key() -> str:
     """The pinned grammar matching the installed pyspark."""
-    return "spark-3.5.1" if pyspark.__version__.startswith("3.5") else "spark-4.0"
+    return "spark-3.5.1" if pyspark.__version__.startswith("3.5") else "spark-4.2"
 
 
 def _id(value):

@@ -433,7 +433,7 @@ def test_pinned_commit_is_a_full_40_char_sha(spec):
 
     Reproducer:
         python -m sparkscreen.grammar.build --list
-        # spark-4.0    commit=3c28a9c0   <- 8 chars, not 40
+        # spark-4.2    commit=3c28a9c0   <- 8 chars, not 40
         # spark-3.5.1  commit=v3.5.1     <- a tag, and therefore movable
     """
     assert _SHA40.match(spec.commit), (
@@ -461,11 +461,11 @@ def test_commit_is_not_a_ref():
             assert not commit.startswith(prefix), f"{spec.key}: pin {commit!r} is a ref"
 
 
-@pytest.mark.parametrize("key", ["spark-4.0", "spark-3.5.1", "spark-4", "3.5.1"])
+@pytest.mark.parametrize("key", ["spark-4.2", "spark-3.5.1", "spark-4", "3.5.1"])
 def test_module_name_has_no_illegal_characters(key):
     """E: the illegal characters are removed from the module name.
 
-    The public key contains a dot and a dash (`spark-4.0`), neither of which is legal
+    The public key contains a dot and a dash (`spark-4.2`), neither of which is legal
     in a Python identifier -- this bit us once already. `module_name` is the fix.
     """
     spec = GrammarSpec(key=key, commit="0" * 40, spark_versions=("1.0",))
@@ -473,7 +473,7 @@ def test_module_name_has_no_illegal_characters(key):
     assert "." not in spec.module_name
 
 
-@pytest.mark.parametrize("key", ["spark-4.0", "spark-3.5.1", "spark-4"])
+@pytest.mark.parametrize("key", ["spark-4.2", "spark-3.5.1", "spark-4"])
 def test_module_name_is_a_valid_python_identifier(key):
     """E: `module_name` must be importable, because it is a package directory name.
 
@@ -519,7 +519,7 @@ def test_python_module_path_is_importable(spec):
     Reproducer:
         from sparkscreen.grammar.spec import get_spec
         import importlib
-        importlib.import_module(get_spec("spark-4.0").python_module("SqlBaseParser"))
+        importlib.import_module(get_spec("spark-4.2").python_module("SqlBaseParser"))
         # -> ModuleNotFoundError: No module named 'sparkscreen.grammar.generated.spark-4'
     """
     mod = spec.python_module("SqlBaseParser")
@@ -637,7 +637,7 @@ def test_parser_imports_and_parses_with_no_java_on_path():
         res = subprocess.run(
             [".venv/bin/python", "-c",
              "from sparkscreen.grammar.parser import SqlParser;"
-             "p = SqlParser('spark-4.0');"
+             "p = SqlParser('spark-4.2');"
              "assert p.parse('select 1').label;"
              "print('ok')"],
             cwd=REPO, env=env, capture_output=True, text=True, timeout=180,
