@@ -736,7 +736,58 @@ syntax is known upstream and deliberately not in the default surface.
 different failure than the one I was testing for, and only visible because I checked the
 error text rather than the boolean.
 
-**What this does and does not settle.** It closes the gap that every 4.x finding so far rested
-on grammar reading alone. It does not cover 4.1 or 3.5.1 against live engines — 4.1 is still
-grammar-verified only, and the CI matrix in `sparkscreen-bp4` is what will hold that line
-honestly from now on.
+**What this settles.** It closes the gap that every 4.x finding so far rested on grammar
+reading alone. F22 takes the same step for 4.1.3 and 3.5.1, so all three lines are now
+engine-verified rather than one of three.
+
+## F22 — spark-4.1 verified against a live 4.1.3 engine; the split is engine-justified
+
+F21 confirmed the 4.2 side against a live 4.2.0 and left 4.1 grammar-verified only. A
+pyspark 4.1.3 engine closes that.
+
+**The differential suite runs clean on 4.1.3: 90 passed, 0 skipped** (against 84 passed /
+6 skipped on 4.2.0, where the skips are the 4.2-only leg by design). All 90 collected on the
+first attempt here, which also confirms the `bp4` collect-count guard is not tuned to one
+engine.
+
+**Re-derived independently rather than trusting the recorded table.** `ENGINE_EXPECTATIONS`
+already asserts our grammar matches what each engine was observed to do, which is circular if
+the table itself is wrong. So the 4.1 answer was taken straight from the engine's parser and
+compared to the shipped `spark-4.1` grammar, 14 constructs, **0 mismatches**:
+
+| construct | live 4.1.3 | `spark-4.1` |
+|---|---|---|
+| `QUALIFY` | reject | reject |
+| `CHANGES FROM VERSION 1` | reject | reject |
+| `CHANGES FROM SYSTEM_VERSION 1 TO VERSION 9` | reject | reject |
+| `JOIN ... APPROX NEAREST` | reject | reject |
+| `JOIN ... EXACT NEAREST` | reject | reject |
+| `INSERT ... REPLACE ON` (4.2 half of the split) | reject | reject |
+| `PRIMARY KEY` / `FOREIGN KEY` | accept | accept |
+| `CREATE STREAMING TABLE` | accept | accept |
+| `TABLESAMPLE` | accept | accept |
+| `INSERT ... REPLACE WHERE` (4.1 half) | accept | accept |
+| `CALL` / `EXECUTE IMMEDIATE` / `BEGIN ... END` | accept | accept |
+
+This is what makes two grammars rather than one the right call, and it is now a statement
+about engine behaviour on both lines instead of a reading of two `.g4` files. Had any
+4.2-only construct parsed on real 4.1.3, the union grammar would have been sound after all
+and the +139 KB would have bought nothing.
+
+**And 3.5.1 too, so all three lines are engine-verified.** `.venv-pyspark` predates the hr0
+rename, so its run was repeated against the current three-grammar tree rather than assumed to
+still hold: **87 passed, 3 skipped** (the skips are constructs 3.5.1 is expected to reject).
+
+| engine | result | grammar resolved |
+|---|---|---|
+| pyspark 3.5.1 | 87 passed, 3 skipped | `spark-3.5.1` |
+| pyspark 4.1.3 | 90 passed, 0 skipped | `spark-4.1` |
+| pyspark 4.2.0 | 84 passed, 6 skipped | `spark-4.2` |
+
+`grammar_key_for_engine()` was checked to resolve each engine to its *own* grammar. That
+matters because the bug it replaced was a two-way ternary that silently mapped the middle
+engine onto the newest grammar -- so "the 3.5.1 leg passed" is only meaningful if the leg
+really screened with `spark-3.5.1`, and that is now asserted rather than assumed.
+
+Every engine this project supports has therefore been run against it, and the CI matrix is
+reproducing locally on all three legs before its first run.
