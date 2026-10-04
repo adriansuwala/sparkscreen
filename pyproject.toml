@@ -38,6 +38,10 @@ dev = [
   "pytest>=8",
   "hypothesis>=6.100",
   "pytest-cov>=5",
+  # tests/test_ci_workflow.py parses .github/workflows/ci.yml, and a YAML guard that
+  # silently skips because the parser is absent checks nothing while reporting SUCCESS
+  # (F25). PyYAML is test-only and has no runtime path into the package.
+  "PyYAML>=6",
 ]
 diff = [
   # Differential testing needs a real engine. Pin the default to the oldest line we

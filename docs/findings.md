@@ -909,3 +909,72 @@ fallback had not neutered the check: caught, exit 1.
 A fix for "my script assumed this machine" that is only ever exercised on a machine with
 the assumed layout has reproduced the original error. The absence of `.venv` has to be part
 of the test, or it is not a test.
+
+---
+
+## F25 — a CI step that never ran, written to guard a step that never ran
+
+Found 2026-10-04. The `docs` job failed with
+
+    /home/runner/work/_temp/a955c4fc-....sh: line 10: syntax error near unexpected token `}'
+
+The runner is quoting *its own generated script*, not anything in this repository. GitHub
+wraps a `run:` block in a temp `.sh` whose default shell is
+`bash --noprofile --norc -eo pipefail {0}`. The block had been written as:
+
+```bash
+grep -q -- "--engine" /tmp/usage.txt || {
+  echo "::error::setup.sh --help does not mention --engine"
+  exit 1
+}
+if grep -qE '^\s*(set |if |for |[A-Z_]+=)' /tmp/usage.txt; then
+  echo "::error::setup.sh --help printed shell code; usage() range is wrong"
+  exit 1
+}          # <-- a brace, where bash requires `fi`
+```
+
+Two mistakes of one shape in one block. `|| { ... }` is valid only with a command before
+the brace — the construct is a command *list*, not a bare block. And `if ... then` closes
+with `fi`, never `}`. Bash parses the whole file before executing any of it, so the step
+died at line 10 having run **nothing**: neither `bash -n scripts/setup.sh` nor
+`setup.sh --help`, which is why the log shows the help text as the last output rather than
+a diagnosis.
+
+**Why nothing caught it, twice over.** The step is shell embedded as a YAML string, so
+`bash -n scripts/setup.sh` — which does pass — never sees it. And the file is not
+executable, so no local run reaches it either. The guard written *to protect this step*
+was itself part of the broken step.
+
+**What was done.** The block now uses `if ... then ... fi` throughout; no bare brace
+remains in the workflow. `tests/test_ci_workflow.py` parses `ci.yml` with `yaml.safe_load`,
+writes every `run:` string to a file verbatim, and runs `bash -n` over it — the same
+parser, and the same flags, that rejected the real step. `${{ ... }}` expressions are
+replaced with a placeholder first, since they are not shell.
+
+**How it was verified.** Three ways, because a parse guard is trivially satisfied by a
+guard that parses nothing.
+
+1. Replayed the step locally in a CI-shaped `git worktree` — no `.venv`, no venv links,
+   real git state — as one `bash -eo pipefail` script: exit 0.
+2. Reintroduced each defect into that tree individually: the original block verbatim, `}`
+   alone in place of `fi`, and `if {` with no command. All three fail with the assertion
+   naming `jobs.docs.steps[4]`; the fixed file passes. A guard not shown to fail is not
+   known to work.
+3. `uvx --from actionlint-py actionlint` on the workflow: clean.
+
+**The second bug, in the guard itself.** The first version of the test began
+`yaml = pytest.importorskip("yaml")`, and PyYAML was in no dependency set. So in both
+local venvs and in CI the module **skipped** — a guard examining zero steps, reporting
+SUCCESS, which is the exact outcome it was written to prevent. This is the same
+vacuous-success shape as F24 and as the differential suite's `importorskip("pyspark")`,
+and it was reached by writing the very check that exists to prevent it.
+
+Fixed at both ends: `PyYAML>=6` is in the `dev` extra, and the module now raises at import
+rather than skipping, so a missing parser is a collection error a runner reports as a red
+job instead of a green one that verified nothing. `test_this_module_will_not_skip_itself_unchecked`
+asserts the extraction is non-empty, so the parse guard cannot pass vacuously either.
+
+**The lesson.** A gate that is itself a gate needs its own vacuity check. `bash -n` on the
+repository's own scripts is real evidence and was never in question — it passed, truthfully,
+about a different file. The step that was broken was the one made of text inside YAML, seen
+by no tool in this repo, including the two guards written to see it.

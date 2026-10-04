@@ -42,8 +42,9 @@ question *in* this table — is what made it drift in the first place.
 
 ## Where we are
 
-`master` is green: **3,833 tests passing in ~49s** with a JVM (3,806 without — the extra
-27 are the pin-identity guard, which generates parsers), 20 skipped, 10 xfailed (all
+`master` is green: **3,941 tests passing in ~49s** with a JVM (3,830 without — the extra
+27 are the pin-identity guard, which generates parsers; a further 90 differential tests
+only collect once the matching engine is installed), 32 skipped, 10 xfailed (all
 documented gaps, none accidental). **90 differential tests collect against a live Spark
 3.5.1** — 87 pass, 3 skip — across four differential modules; 18 engine-specific
 expectations (6 per engine) are recorded for 3.5.1, 4.1.3 and 4.2.0, all three verified

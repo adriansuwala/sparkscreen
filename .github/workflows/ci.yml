@@ -234,14 +234,14 @@ jobs:
         run: |
           bash -n scripts/setup.sh
           ./scripts/setup.sh --help | tee /tmp/usage.txt
-          grep -q -- "--engine" /tmp/usage.txt || {
+          if ! grep -q -- "--engine" /tmp/usage.txt; then
             echo "::error::setup.sh --help does not mention --engine"
             exit 1
-          }
+          fi
           if grep -qE '^\s*(set |if |for |[A-Z_]+=)' /tmp/usage.txt; then
             echo "::error::setup.sh --help printed shell code; usage() range is wrong"
             exit 1
-          }
+          fi
 
   grammar-build:
     # Regenerating the parsers is a maintainer operation: the generated parsers are
