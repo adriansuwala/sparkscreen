@@ -495,3 +495,108 @@ came from Spark's own behaviour, and overwrite-versus-error came from executing 
 and counting rows. The grammar is a good oracle for *shape* and a poor one for
 *meaning*.
 
+## F17 — the `spark-4.0` grammar is not 4.0's grammar
+
+`src/sparkscreen/grammar/spec.py` declares `spark_versions=("4.0.0", "5.0.0")` for the
+`spark-4.0` spec. The pinned commit `3c28a9c093f1026d76e53d3eb2b846ffb28465c8` is dated
+2026-08-03. Spark 4.2.0 was released 2026-07-11. The pin is therefore a *post-4.2 master*
+grammar, about three weeks of development newer than the 4.2.0 tag, not the 4.0.0 grammar
+the key names.
+
+Measured against the upstream release grammars (rule inventory of `SqlBaseParser.g4`):
+
+| upstream | rules | missing from vendored | extra in vendored |
+|---|---|---|---|
+| v3.5.1 | 184 | 4 | 121 |
+| v4.0.0 | 239 | 5 | 67 |
+| v4.1.3 | 272 | 1 | 30 |
+| v4.2.0 | 283 | 0 | 18 |
+
+So it is a superset of 4.2.0 carrying 18 rules that belong to no released line —
+`asofJoinType`, `binByClause`, the `autoCdc*` family, `temporalTableIdentifier` and
+relatives.
+
+Two consequences, both verified through the shipped parser rather than inferred:
+
+**It over-accepts relative to what the key promises.** `FOREIGN KEY` / `PRIMARY KEY`
+constraints, `QUALIFY` and `WINDOW` all parse on it, and none of them exist in the 4.0.0
+grammar. A user who selects `spark-4.0` expecting 4.0 semantics gets a looser parser than
+4.0 is.
+
+**It never rejected anything a real engine accepts.** A 56-statement corpus spanning DDL,
+DML, scripts and the 4.1/4.2 feature set was parsed by real 4.1.3 and real 4.2.0 grammars
+— generated from the upstream release tags through sparkscreen's own
+`port_to_python`/`generate` — and by the shipped grammar. Zero statements were accepted by
+a real grammar and rejected by the shipped one. For a fail-closed screener that is the
+cheap direction to be wrong in: over-accepting costs precision, under-accepting costs a
+false `UNKNOWN` on working production code.
+
+This is not a new defect class. It is the same shape as the `Reason.PYTHON_DANGEROUS_CALL`
+invariant: a *capability claim* that stopped being true without saying so. The pin moved;
+the name and the version range did not.
+
+**Why we might be wrong.** Those 18 extra rules are on master and could be reverted before
+any release, in which case the grammar would quietly become 4.2-shaped and the pin should
+move to the 4.2.0 tag instead. The finding is about the mislabelling, not about the
+grammar being wrong.
+
+## F18 — 4.1 and 4.2 grammars diverge in six user-facing features
+
+The plan was to share one grammar between 4.1 and 4.2 on the bet that they do not diverge.
+They do. Real 4.1.3 and real 4.2.0 grammars, both generated from the upstream release tags
+and both queried through the same entry rule (`compoundOrSingleStatement`), disagree on six
+constructs:
+
+| feature | introduced | 4.1.3 | 4.2.0 |
+|---|---|---|---|
+| `QUALIFY` clause | 4.2 | rejects | accepts |
+| `CHANGES FROM VERSION <int>` | 4.2 | rejects | accepts |
+| `CHANGES FROM VERSION '<str>'` | 4.2 | rejects | accepts |
+| `CHANGES FROM SYSTEM_VERSION a TO VERSION b` | 4.2 | rejects | accepts |
+| `JOIN ... APPROX NEAREST BY DISTANCE` | 4.2 | rejects | accepts |
+| `JOIN ... EXACT NEAREST BY SIMILARITY` | 4.2 | rejects | accepts |
+
+At the rule level 4.2 adds 12 rules over 4.1 (`qualifyClause`, `changesClause`,
+`streamChangesClause`, `nearestByClause`, `tableFunctionCall`, `withLocalTimeZone`,
+`withoutTimeZone`, `pathElement`, `codeLiteral`, `identifiedByClause`,
+`singlePathElementList`, `tableFunctionCallWithTrailingClauses`) and drops one
+(`functionTable`).
+
+All six divergences are *additive in 4.2*. One grammar can therefore serve both lines for
+screening purposes — the union accepts everything either engine accepts — at the cost of
+accepting `QUALIFY`/`CHANGES`/`NEAREST` against a real 4.1 cluster, where the statement
+would fail at the engine. That is an imprecision in verdicts, not a false `UNKNOWN`. Since
+the verdict set has no state for "this parses but the engine would reject it", the honest
+description is that a shared 4.1/4.2 grammar is sound but imprecise in one direction, and
+that direction is the cheap one.
+
+The six test statements were corrected twice after first drafts failed on **both**
+grammars. `CHANGES FROM VERSION => 1` is invalid — `version` is `INTEGER_VALUE |
+stringLit`, with no arrow. `JOIN APPROX NEAREST BY DISTANCE` is invalid without the
+`APPROX`/`EXACT` prefix that `nearestByClause` requires. A probe that reports a defect
+where two independent real grammars agree that nothing is wrong is measuring the probe.
+Derive the SQL from the upstream rule bodies rather than from memory of the syntax.
+
+## F19 — Spark 3.4 needs a mapping entry, not a grammar; 3.3 and earlier are correctly absent
+
+The 3.5.1 grammar's rule set is a strict superset of 3.4's: 184 rules against 172, and
+`rules(3.4) - rules(3.5.1)` is **empty**. No 3.4-only rule survives into 3.5. A 12-statement
+3.4-era corpus — CTAS with `USING`, `MERGE`, `INSERT OVERWRITE`, `INTERSECT`/`EXCEPT`,
+`CAST` to `ARRAY<INT>`, `ADD COLUMNS`, `TABLESAMPLE`, `CREATE OR REPLACE TEMPORARY VIEW` —
+parses 12/12 on the shipped 3.5.1 grammar.
+
+So if a 3.4 user appears, 3.4 support is one version-mapping entry in `SPECS`: no vendored
+grammar, no generated parser. It was not built now because 3.4 is past end of life
+(2024-10-21), 3.3 ended 2023-12-09, and the only managed runtime still on 3.4 is Databricks
+Runtime 13.3 LTS (Spark 3.4.1), which leaves support 2026-08-22.
+
+This is the F-numbers equivalent of a measured gap list: what 3.4 support would cost is now
+a number rather than an assumption, so the decision not to build it is revisitable the
+moment someone asks.
+
+**Popularity context.** pyspark PyPI downloads, last 90 days (pepy.tech; includes CI
+traffic, so stale pins are over-represented): 3.5.x 25.0%, 4.2 16.8%, 3.4 7.8%, 3.3 5.0%,
+4.1 4.9%, 4.0 4.1%, other 36.3%. Managed platforms skew older than that: EMR ships 3.5.x
+through 7.13, GCP's default image 2.2 is Spark 3.5.3, and Databricks Runtime 15.4/16.4 LTS
+are both Spark 3.5. Upstream support ends 2026-11-23 for 4.0 and runs to 2027-11-30 for
+the 3.5 LTS.
