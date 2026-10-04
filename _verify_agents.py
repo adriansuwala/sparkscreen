@@ -135,6 +135,57 @@ def main() -> int:
     from sparkscreen.analysis.effects import LABEL_EFFECTS
     check("122 labels mapped", len(LABEL_EFFECTS), 122)
 
+    # The rest of the "Current state" block was stale for a whole release cycle: the
+    # suite count, the differential-expectation count and the grammar count all said
+    # two grammars / 3,146 tests while the repo had three and 3,833. Nothing failed,
+    # because the audit pinned only the label count. A number quoted in prose is a claim
+    # like any other, and it needs the same treatment.
+    from sparkscreen.grammar.spec import SPECS
+    check("three pinned grammars", sorted(s.key for s in SPECS),
+          ["spark-3.5.1", "spark-4.1", "spark-4.2"])
+
+    from sparkscreen.analysis.label_universe import grammar_labels
+    check("label universe across all grammars", len(list(grammar_labels())), 112)
+
+    # Differential expectations, per engine. Imported from the corpus rather than counted
+    # by hand, and pinned to one per pinned engine so a new grammar cannot arrive without
+    # its live expectations.
+    sys.path.insert(0, str(ROOT))
+    try:
+        from tests.differential.corpus import ENGINE_EXPECTATIONS
+        check("per-engine differential expectations",
+              {k: len(v) for k, v in sorted(ENGINE_EXPECTATIONS.items())},
+              {"3.5.1": 6, "4.1.3": 6, "4.2.0": 6})
+    except ImportError as exc:
+        check(f"per-engine differential expectations importable ({exc})", False, True)
+    finally:
+        sys.path.pop(0)
+
+    # The suite count quoted in AGENTS.md. Not pinned to an exact number: it moves
+    # whenever a test is added, and an exact pin would be a chore that people disable.
+    # What is actually wrong is a *stale* number, so check the property that catches
+    # staleness -- the quoted figure must be within 10% of what the suite collects.
+    #
+    # Compared against the COLLECTED count, not the passed count. Collected includes
+    # skips and xfails, which by definition do not pass, so pinning to "passed" would
+    # demand a number that never matches. Note `--collect-only -q` prints one
+    # "file: count" line per module and no summary line, so the total must be summed;
+    # counting node ids instead silently returns 0 and the check passes on nothing.
+    agents_md = src("AGENTS.md")
+    collect = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/", "--collect-only", "-q",
+         "-p", "no:cacheprovider"],
+        capture_output=True, text=True, cwd=ROOT)
+    total = 0
+    for line in collect.stdout.splitlines():
+        tail = line.rsplit(":", 1)[-1].strip()
+        if ".py:" in line and tail.isdigit():
+            total += int(tail)
+    quoted = [int(n.replace(",", "")) for n in re.findall(r"([\d,]{4,}) tests? ", agents_md)]
+    check("AGENTS.md quotes a current test count",
+          bool(quoted) and all(abs(q - total) / total <= 0.10 for q in quoted), True)
+
+
     model = src("src/sparkscreen/model.py")
     check("Report.verdict aggregates on verdict, not reason",
           bool(re.search(r"def verdict\(self\).*?Verdict\.DENY", model, re.S))

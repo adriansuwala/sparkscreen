@@ -67,12 +67,15 @@ SQLite DB and will silently disagree with a hand-edited JSONL.
 /opt/data/.local/bin/br list --status open
 ```
 
-## Current state (2026-10-03)
+## Current state (2026-10-04)
 
 - 0.8.0 — pre-1.0; see `sparkscreen.VERSION_NOTES` for why
-- 3,146 tests passing, 19 skipped, 8 xfailed (all documented gaps)
-- 51 differential expectations against live Spark 3.5.1
-- 122 statement labels mapped to `Effect` flags across both pinned grammars
+- 3,806 tests passing without a JVM, 3,833 with one (the extra 27 are the pin-identity
+  guard, which generates parsers and is skipped when no JVM is present)
+- Three pinned grammars: `spark-4.2`, `spark-4.1`, `spark-3.5.1`
+- 18 differential expectations (6 per engine), all three verified against live engines
+- 122 statement labels mapped to `Effect` flags; the derived label universe across all
+  three grammars is 112
 - ~12 ms for a 20-statement file, warm (`python scripts/bench.py`)
 - Mutation-tested with mutmut: `.venv/bin/mutmut run --max-children 4`
   (config in `[tool.mutmut]`; `process_isolation = "forkserver"` is required — see F15)
