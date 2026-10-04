@@ -205,9 +205,43 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Documentation audits
-        # Four separate steps, not a loop: a failure names the audit that broke in the job
-        # log without needing to be read back out of a combined exit code.
+        # Includes _verify_refs.py, which scans for grammar-key and engine-pin literals
+        # naming something we do not ship. That check exists because setup.sh carried a
+        # retired key in its verification loop for two releases with nothing executing it.
+        #
+        # One step, not five: a loop or five steps would read as deliberate isolation, but
+        # ci_checks.py runs them all under one name, so splitting them here would only
+        # duplicate that. The failing script's own output names itself.
         run: python scripts/ci_checks.py audits
+
+      - name: setup.sh parses and its help text is valid
+        # setup.sh is the new-contributor path and nothing ran it, which is how it carried a
+        # retired grammar key in its verification loop for two releases. Two things guard it
+        # now, and this step is the weaker one:
+        #
+        #   1. _verify_refs.py, in the step above, catches the staleness statically. That is
+        #      the real guard and it needs no environment.
+        #   2. This step, which catches the script being *broken* -- a bash syntax error, a
+        #      helper called before it is defined, --help printing shell code. Those are
+        #      cheap to make and would otherwise sit undetected until a new contributor ran
+        #      the one script whose entire job is to work for someone who has never used it.
+        #
+        # `--help` rather than `--check`: a runner has no .venv-pyspark, and `--check`
+        # asserts on venvs it legitimately does not have. Provisioning 500MB to validate a
+        # script is the tail wagging the dog, and the differential job already proves the
+        # engines work. --help exercises argument parsing and the usage() helper, which is
+        # where the real bugs in a shell script of this shape live.
+        run: |
+          bash -n scripts/setup.sh
+          ./scripts/setup.sh --help | tee /tmp/usage.txt
+          grep -q -- "--engine" /tmp/usage.txt || {
+            echo "::error::setup.sh --help does not mention --engine"
+            exit 1
+          }
+          if grep -qE '^\s*(set |if |for |[A-Z_]+=)' /tmp/usage.txt; then
+            echo "::error::setup.sh --help printed shell code; usage() range is wrong"
+            exit 1
+          }
 
   grammar-build:
     # Regenerating the parsers is a maintainer operation: the generated parsers are

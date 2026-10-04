@@ -54,9 +54,18 @@ PATH="$JAVA_HOME/bin:$PATH" .venv-pyspark/bin/python \
 Docs audits are separate scripts, not part of the suite:
 
 ```bash
-.venv/bin/python _verify_docs.py    # 45 claims in docs/user-docs/
-.venv/bin/python _verify_effect.py  # 24 Effect-design claims
-.venv/bin/python _verify_readme.py  # 38 claims in README.md
+.venv/bin/python _verify_docs.py    # claims in docs/user-docs/
+.venv/bin/python _verify_effect.py  # Effect-design claims
+.venv/bin/python _verify_readme.py  # claims in README.md
+.venv/bin/python _verify_refs.py    # every grammar key and engine pin in the tree
+
+# _verify_refs.py is the staleness guard. setup.sh once carried a grammar key in its
+# verification loop for two releases after F17 removed that key, and usage.md told readers
+# to pass a retired key in its headline example -- nothing executed the script and no audit
+# read the literal. It scans for grammar-key-shaped literals rather than listing known-bad
+# ones, so it catches the next one too. Note that writing up the bug here in AGENTS.md
+# tripped the audit itself until the line was reworded: prose describing a stale literal is
+# the same shape as one. See scripts/ci_checks.py to run all five.
 ```
 
 Issue ledger is `br` (beads). `br list --status open`; the DB is gitignored but
