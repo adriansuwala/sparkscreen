@@ -870,3 +870,42 @@ nobody encoded.
 The cheapest real guard is a `br close` reason that names the commit, checked against
 `git log` — the ledger already links findings to code, so the stale claim is detectable by
 comparing a finding's status against the branches containing it. Not built here.
+
+---
+
+## F24 — the new audit hardcoded `.venv` again, on its first CI run
+
+The CI `docs` job failed on the commit that introduced `_verify_refs.py`:
+
+    FileNotFoundError: [Errno 2] No such file or directory:
+      '/home/runner/work/sparkscreen/sparkscreen/.venv/bin/python'
+
+It died in `real_keys()`, before checking a single literal. CI installs `.[dev]` into the
+job's own Python and has no `.venv`; the audit shelled out to `ROOT/.venv/bin/python`
+unconditionally.
+
+**This is the third instance of one bug.** `_verify_readme.py` and `_verify_agents.py` were
+both fixed for exactly this earlier (`d27eb07`), and both now look the interpreter up with
+the same four lines. The new audit did not inherit the fix, because the fix lives in the
+sibling files rather than anywhere it could be picked up.
+
+The lesson is about *where a fix lives*, not about the bug. Three copies of the same
+defect, and a fix that only ever lands in the copies that already had it. An audit is
+supposed to be the thing that catches this class of assumption — so it is the worst place
+for one to survive.
+
+**What was done.** `_python()` now looks the interpreter up the same way its siblings do:
+`.venv/bin/python` if it exists, else `sys.executable`. `cwd=ROOT` stays load-bearing,
+because a relative interpreter path resolves against the subprocess cwd rather than the
+caller's, so without it the fallback would look in the wrong directory — a bug that would
+have passed locally and failed in CI again.
+
+**How it was verified.** Not by running it here, where `.venv` exists and the original code
+also worked. A CI-shaped tree was built from `git archive` — tracked files only, no
+`.venv` — and the audit run there: passes, and `scripts/ci_checks.py audits` reports all
+five audits green. Then a genuinely stale literal was planted in that tree to confirm the
+fallback had not neutered the check: caught, exit 1.
+
+A fix for "my script assumed this machine" that is only ever exercised on a machine with
+the assumed layout has reproduced the original error. The absence of `.venv` has to be part
+of the test, or it is not a test.

@@ -20,7 +20,9 @@ would be wrong on day one -- F17 exists to document that removal -- so the allow
 explicit, and narrow enough that adding to it is a decision rather than a suppression.
 
 Not part of the pytest suite: a repo-wide audit, like its siblings. It shells out to git
-and walks the tree, which the fast suite should not do. Run:
+and walks the tree, which the fast suite should not do. It also shells out to a Python
+interpreter to read the real grammar keys, so it looks one up rather than assuming
+`.venv` -- CI has no `.venv` and this cost a red build once already (F24). Run:
     .venv/bin/python _verify_refs.py
 """
 from __future__ import annotations
@@ -106,7 +108,19 @@ def check(label: str, got, want) -> None:
 
 
 def _python(code: str) -> str:
-    out = subprocess.run([str(ROOT / ".venv" / "bin" / "python"), "-c", code],
+    # The interpreter is looked up, not assumed, same as _verify_readme.py and
+    # _verify_agents.py. CI installs `.[dev]` into the job's own Python and has no
+    # `.venv` at all, so a hardcoded `.venv/bin/python` made this audit die with
+    # FileNotFoundError before it checked a single literal. The running interpreter
+    # IS the environment in CI, so fall back to it.
+    #
+    # `cwd=ROOT` is load-bearing: a relative interpreter path is resolved against the
+    # subprocess cwd rather than the caller's, so without it the fallback would look
+    # in the wrong directory.
+    fast_python = _Path(".venv/bin/python")
+    if not fast_python.exists():
+        fast_python = _Path(_sys.executable)
+    out = subprocess.run([str(fast_python), "-c", code],
                          capture_output=True, text=True, cwd=ROOT, check=True)
     return out.stdout
 
