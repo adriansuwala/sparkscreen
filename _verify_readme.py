@@ -173,9 +173,18 @@ df.write.mode("overwrite").saveAsTable("prod.events_v2")
         check(f"interprocedural refuses: {label}", screen(snippet).verdict, Verdict.UNKNOWN)
 
     # --- the two-env split the README tells people to use ---
-    fast = subprocess.run([str(ROOT / ".venv/bin/python"), "-c", "import pyspark"],
-                          capture_output=True, text=True)
-    check("fast .venv has no pyspark (README claims this)", fast.returncode != 0, True)
+    # Same lookup as _verify_agents.py: CI has no `.venv` (it installs `.[dev]` into
+    # the job's own Python), so a hardcoded `.venv/bin/python` made this audit die with
+    # FileNotFoundError before checking a single claim. `cwd=ROOT` is load-bearing --
+    # a relative interpreter path is resolved against the subprocess cwd, not the
+    # caller's, so without it the fallback would look in the wrong place.
+    fast_python = pathlib.Path(".venv/bin/python")
+    if not fast_python.exists():
+        fast_python = pathlib.Path(sys.executable)
+    fast = subprocess.run([str(fast_python), "-c", "import pyspark"],
+                          capture_output=True, text=True, cwd=ROOT)
+    check("the fast environment has no pyspark (README claims this)",
+          fast.returncode != 0, True)
     check("setup.sh exists and is executable",
           (ROOT / "scripts/setup.sh").exists()
           and bool((ROOT / "scripts/setup.sh").stat().st_mode & 0o111), True)
