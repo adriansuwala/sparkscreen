@@ -84,6 +84,10 @@ include = ["sparkscreen*"]
   "grammar/generated/**/*.py",
   "grammar/generated/**/*.tokens",
   "grammar/generated/**/*.interp",
+  # The default policy files ship too: `sparkscreen --init-policy --spark <ver>` reads
+  # them from the installed package, so a wheel without them breaks the documented
+  # starting point for every user who does not copy out of the repo.
+  "policies/**/*.jsonc",
 ]
 
 [tool.mutmut]
