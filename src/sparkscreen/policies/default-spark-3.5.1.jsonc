@@ -187,7 +187,7 @@
       "message": "read-only query",
       "severity": "info",
       "labels": ["StatementDefault"],
-      "description": "The only label allowed outright. USE, USE NAMESPACE, SET CATALOG, SHOW*, DESCRIBE*, EXPLAIN, ANALYZE, REFRESH*, COMMENT*, CREATE NAMESPACE and CREATE VIEW are all in the read-only label set and fall through to ALLOW without needing a rule of their own. The wrapper labels (DmlStatement, SingleInsertQuery, MultiInsertQuery) are deliberately absent: the tree walk descends through them to the resolved statement, so a rule keyed on a wrapper would never fire."
+      "description": "The only label allowed outright. USE, USE NAMESPACE, SET CATALOG, DESCRIBE*, EXPLAIN, ANALYZE, REFRESH*, COMMENT*, CREATE NAMESPACE and CREATE VIEW are all in the read-only label set and fall through to ALLOW without needing a rule of their own. Most SHOW forms do too, but not all: ShowTableExtended and ShowTblProperties are NOT in the read-only set, so they fail closed (UNKNOWN / REVIEW) -- verified against the 3.5.1 grammar, not assumed from the SHOW prefix. The wrapper labels (DmlStatement, SingleInsertQuery, MultiInsertQuery) are deliberately absent: the tree walk descends through them to the resolved statement, so a rule keyed on a wrapper would never fire."
     }
   ],
 
