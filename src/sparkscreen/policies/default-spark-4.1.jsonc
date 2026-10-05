@@ -1,0 +1,264 @@
+{
+  // sparkscreen default policy -- Spark 4.1
+  //
+  // Written for `sparkscreen --spark 4.1` (any 4.1.x release) or `--spark spark-4.1`.
+  // It carries the same rules as default-spark-3.5.1.jsonc plus the statements only the
+  // 4.x grammars accept: for 4.2 the split of `INSERT INTO ... REPLACE WHERE` into
+  // REPLACE WHERE / REPLACE ON applies, so use
+  // `sparkscreen --init-policy --spark 4.2 > policy.jsonc` for a 4.2 engine.
+  //
+  // This is JSONC: comments and trailing commas are allowed. The loader is
+  // sparkscreen.jsonc, which tracks string state -- which matters here, because
+  // `literal_prefixes` below contains values like "s3://" that a naive comment-stripper
+  // would eat.
+  //
+  // HOW RULES MATCH
+  //   The FIRST rule whose `labels` contains the statement's resolved label wins, so
+  //   order is significant. A label appearing in two rules means the later rule is dead.
+  //   Labels are ANTLR statement labels, not regexes: `labels: ["DropTable"]` matches
+  //   DROP TABLE however it is spelled, including `"DR"+"OP TABLE t"`, because there is
+  //   no text matching anywhere in the pipeline.
+  //
+  //   Under 4.1 the entry rule is `compoundOrSingleStatement`, so a statement may be a
+  //   BEGIN...END script. The tree walk yields each `;`-separated statement of the body
+  //   as its own finding under its own label, so the rules below apply inside scripts
+  //   unchanged -- `BEGIN DROP TABLE t; END` is a DropTable, verified against the
+  //   shipped 4.1 parser.
+  //
+  //   The trap inside scripts is CONTROL FLOW: a CASE / IF / WHILE / LOOP body does not
+  //   surface what it contains. `BEGIN CASE WHEN TRUE THEN DROP TABLE t; END CASE; END`
+  //   reports as `SearchedCaseStatement` and only that -- the enclosed DropTable is
+  //   never seen as a label. `SearchedCaseStatement` and `SimpleCaseStatement` are in
+  //   the 4.1 universe and carry no effect of their own, which is exactly why they have
+  //   no rule here, and why no rule may ever ALLOW them: without a rule they are REVIEW
+  //   (unsupported_statement), which is the fail-closed answer for a statement whose
+  //   body the screener cannot see. Adding `["SearchedCaseStatement"]` to an allow rule
+  //   would turn that hidden DROP TABLE into an ALLOW.
+  //
+  // VERDICTS
+  //   deny   -- refuse. Use for irreversible loss and for arbitrary code execution.
+  //   review -- we know what it does; a human decides. Exit code 2, same as unknown.
+  //   allow  -- only ever for statements with no durable effect.
+  //
+  // WHY NOT JUST USE THE BUILT-IN DEFAULT?
+  //   `default_policy()` in policy.py is a reasonable conservative baseline, but it is
+  //   code, so it cannot be adjusted without a fork. This file is the editable version,
+  //   and it differs from the built-in in the same directions the 3.5.1 file does: it
+  //   denies `INSERT INTO ... REPLACE WHERE` and the column-destroying ALTER forms the
+  //   built-in has no rule for, while leaving reversible schema changes at REVIEW.
+  //
+  // WHAT 4.1 ADDS (verified against the spark-4.1 grammar, not inferred)
+  //   * SET ROLE is its own label (`FailSetRole`); 3.5.1 folds it into
+  //     `FailNativeCommand`. Both labels are denied below. There is NO `!cmd`
+  //     shell-escape alternative in the 4.1 grammar: `!ls /` fails to parse and
+  //     reports UNKNOWN (exit 2), which is the fail-closed outcome anyway.
+  //   * `CREATE FUNCTION ... AS 'class' USING resource` (CreateFunction) and
+  //     `CREATE FUNCTION ... RETURN <query|expression>` (CreateUserDefinedFunction) are
+  //     separate alternatives. The first loads a class by path; the second's body is
+  //     parsed SQL.
+  //   * `EXECUTE IMMEDIATE '<sql>'` (VisitExecuteImmediate) runs SQL held in an
+  //     expression. screen() extracts each hidden statement and screens it under this
+  //     same policy, so a destructive payload still drives the report to DENY; the
+  //     outer REVIEW covers the indirection itself.
+  //   * Session variables: DECLARE / DROP TEMPORARY VARIABLE, `SET <var> = ...` and the
+  //     script-only bare `SET <var> = ...` (SetVariable vs SetVariableInsideSqlScript).
+  //   * Constraints (ALTER TABLE ADD/DROP CONSTRAINT), collation (ALTER TABLE /
+  //     ALTER NAMESPACE ... DEFAULT COLLATION), clustering (ALTER TABLE ... CLUSTER BY).
+  //   * Despite the label name, `CreatePipelineDataset` is what 4.1's grammar calls
+  //     `CREATE MATERIALIZED VIEW` / `CREATE STREAMING TABLE`, and
+  //     `CreatePipelineInsertIntoFlow` is `CREATE FLOW ... AS INSERT INTO ...`.
+
+  "name": "sparkscreen-defaults-4.1",
+
+  // NAMESPACES
+  //
+  // Empty on purpose, and this is the fail-closed state rather than a permissive one. See
+  // the writable_namespaces note below before filling either in.
+  //
+  // `writable_namespaces` / `readable_namespaces` are two INDEPENDENT checks, not
+  // alternatives: a statement can be writable in a namespace you may not read from, and
+  // both objections are raised. Patterns are per dot-separated component and `*` matches
+  // exactly ONE component, so `prod.*` matches `prod.users` but NOT `prod.staging.x` and
+  // not a bare `users`. A bare `"*"` matches anything, i.e. no restriction.
+  //
+  // `writable_namespaces` tightens statements that mutate data -- and, importantly, it is
+  // the ONLY thing that confirms a DataFrame write destination. Leave it empty and every
+  // `df.write.saveAsTable(...)` is reported REVIEW with "the destination could not be
+  // confirmed as in bounds", because an empty list is not permission to write.
+  "writable_namespaces": [],
+
+  // `readable_namespaces` tightens everything that reads, so a screen cannot exfiltrate
+  // PII out of a namespace you did not intend to open up.
+  "readable_namespaces": [],
+
+  "rules": [
+    {
+      "id": "deny.load-code",
+      "verdict": "deny",
+      "reason": "deny_rule",
+      "message": "adds a JAR/file resource or creates a function from one; this is arbitrary code loading",
+      "severity": "critical",
+      "labels": ["ManageResource", "CreateFunction"],
+      "description": "Effect LOAD_CODE. Unconditional: the jar path is agent-controlled, so no path pattern makes it safe. Note there is no path-based exemption available here -- spark-4.1's grammar matches the ADD JAR path with a `.*?` wildcard (`op=(ADD | LIST) simpleIdentifier .*?`) rather than a string-literal rule, so `literal_prefixes` cannot see it at all. Do not expect `literal_prefixes` to narrow this one."
+    },
+    {
+      "id": "deny.native-or-role",
+      "verdict": "deny",
+      "reason": "deny_rule",
+      "message": "SET ROLE, or a Hive native command the parser cannot inspect",
+      "severity": "critical",
+      "labels": ["FailNativeCommand", "FailSetRole"],
+      "description": "4.1 splits what 3.5.1 folds into one label: `SET ROLE ...` is now FailSetRole and `unsupportedHiveNativeCommands` (CREATE ROLE, DROP ROLE, GRANT, REVOKE, EXPORT TABLE, IMPORT TABLE, ...) stays FailNativeCommand. Both are DENY: the first escalates privilege by changing the identity later statements run as, the second covers commands the grammar cannot inspect -- grant and revoke among them, which are privilege changes too."
+    },
+    {
+      "id": "deny.local-filesystem",
+      "verdict": "deny",
+      "reason": "deny_rule",
+      "message": "LOAD DATA reads from a local path",
+      "severity": "critical",
+      "labels": ["LoadData"],
+      "description": "Effect READ_LOCAL_FS. This denies BOTH `LOAD DATA LOCAL INPATH` and the non-LOCAL form, because 4.1 uses a single grammar alternative for both (`LOAD DATA LOCAL? INPATH path=stringLit ...`) -- there is no separate label, so a policy cannot tell them apart, and the path is agent-controlled either way. If that is too strict for your pipelines, change this rule's `verdict` to `review`, or delete the rule. Note that `literal_prefixes` can only ESCALATE a verdict to deny, never relax one."
+    },
+    {
+      "id": "deny.destroy",
+      "verdict": "deny",
+      "reason": "deny_rule",
+      "message": "drops or truncates a table/view/namespace/function/index/constraint",
+      "severity": "critical",
+      "labels": [
+        "DropTable", "DropView", "DropNamespace", "DropFunction", "DropIndex",
+        "DropTablePartitions", "TruncateTable", "DropTableConstraint"
+      ],
+      "description": "Effect DESTROY_DATA. Irreversible: re-running the job does not restore the rows. `DropNamespace` takes the whole database with it, which is why it sits in the most severe group rather than the schema one. `DropTableConstraint` (ALTER TABLE ... DROP CONSTRAINT) is new in 4.1: it drops the object, not rows, but it sits with the drops so a team relaxing table drops in a scratch namespace does not silently permit it."
+    },
+    {
+      "id": "deny.destroy-columns",
+      "verdict": "deny",
+      "reason": "deny_rule",
+      "message": "drops or replaces columns, losing their data",
+      "severity": "critical",
+      "labels": ["DropTableColumns", "HiveReplaceColumns"],
+      "description": "Effect DESTROY_DATA + WRITE_SCHEMA. Kept as its own rule rather than folded into deny.destroy so a team can relax table drops in a scratch namespace without silently permitting column loss. `ALTER TABLE ... REPLACE COLUMNS` looks structural but is a data loss event."
+    },
+    {
+      "id": "deny.overwrite",
+      "verdict": "deny",
+      "reason": "destructive_statement",
+      "message": "overwrites or replaces existing data (INSERT OVERWRITE / REPLACE TABLE / INSERT ... REPLACE WHERE)",
+      "severity": "critical",
+      "labels": [
+        "InsertOverwriteTable", "InsertOverwriteHiveDir", "InsertOverwriteDir",
+        "ReplaceTable", "InsertIntoReplaceWhere"
+      ],
+      "description": "Effect DESTROY_DATA. `INSERT INTO t REPLACE WHERE <pred> SELECT ...` deletes every row the predicate selects and is therefore DENY, whereas plain INSERT below is only REVIEW. It is easy to read REPLACE WHERE as a filter and get that backwards. Under 4.1 this is still one grammar alternative (`insertIntoReplaceWhere`); 4.2 is the release that splits it into REPLACE WHERE and REPLACE ON, which is the one 4.1/4.2 divergence a policy file has to care about."
+    },
+    {
+      "id": "deny.external-location",
+      "verdict": "deny",
+      "reason": "deny_rule",
+      "message": "repoints an existing table or namespace at an external filesystem location",
+      "severity": "critical",
+      "labels": ["SetTableLocation", "SetNamespaceLocation"],
+      "description": "Effect REACHES_EXTERNAL + WRITE_SCHEMA. Treated as destruction of the old location rather than a schema tweak: after this, nothing points at the data any more, and a subsequent write lands wherever the agent chose."
+    },
+    {
+      "id": "deny.external-create-location",
+      "verdict": "allow",
+      "reason": "no_matching_rule",
+      "message": "creates a table, view or temp view",
+      "severity": "info",
+      "labels": ["CreateTable", "CreateTableLike", "CreateTempViewUsing"],
+      "literal_prefixes": [
+        "s3://", "s3a://", "s3n://", "abfs://", "abfss://", "wasb://", "wasbs://",
+        "gs://", "gcs://", "hdfs://", "file:/", "file://", "/"
+      ],
+      "description": "Base verdict allow -- creating a table destroys nothing. The `literal_prefixes` list escalates this to DENY when a string literal in the statement starts with one of them, i.e. when the LOCATION points outside a managed warehouse. THIS IS THE ONE RULE MOST LIKELY TO NEED EDITING FOR YOUR ESTATE: the bare \"/\" prefix denies any absolute path, so if your warehouse is legitimately rooted at /mnt/warehouse, delete that one entry before use. Deleting the whole `literal_prefixes` list allows every location."
+    },
+    {
+      "id": "review.row-mutation",
+      "verdict": "review",
+      "reason": "destructive_statement",
+      "message": "mutates rows in place (DELETE / UPDATE / MERGE / INSERT); needs review to confirm the WHERE clause",
+      "severity": "high",
+      "labels": [
+        "DeleteFromTable", "UpdateTable", "MergeIntoTable", "InsertIntoTable"
+      ],
+      "description": "Effect WRITE_DATA, plus DESTROY_DATA on the first three. REVIEW rather than DENY because a correctly scoped DELETE is routine work -- but DESTROY_DATA is deliberately never certified harmless, so this cannot be ALLOW either; the screener cannot see that the WHERE clause is the right one. If you want row mutation gated rather than reviewed, change the verdict to deny."
+    },
+    {
+      "id": "review.repair",
+      "verdict": "review",
+      "reason": "destructive_statement",
+      "message": "walks the external filesystem to add or reconcile partitions (MSCK REPAIR / RECOVER PARTITIONS); needs review",
+      "severity": "high",
+      "labels": ["RepairTable", "RecoverPartitions"],
+      "description": "Effect REACHES_EXTERNAL + WRITE_SCHEMA. Both the cost and the blast radius scale with a path glob inside the table definition, which the screener cannot see. So a REVIEW on a table pointing at a broad prefix is a real warning, not noise. In 4.1 RecoverPartitions is spelled `ALTER TABLE t RECOVER PARTITIONS`."
+    },
+    {
+      "id": "review.schema-mutation",
+      "verdict": "review",
+      "reason": "destructive_statement",
+      "message": "changes table or view structure or properties without dropping data; needs review",
+      "severity": "medium",
+      "labels": [
+        "AlterTableAlterColumn", "HiveChangeColumn", "AddTableColumns",
+        "AddTableConstraint", "AddTablePartition", "RenameTable", "RenameTableColumn",
+        "RenameTablePartition", "SetTableProperties", "UnsetTableProperties",
+        "SetTableSerDe", "SetNamespaceProperties", "UnsetNamespaceProperties",
+        "SetNamespaceCollation", "AlterTableCollation", "AlterClusterBy",
+        "AlterViewQuery", "AlterViewSchemaBinding", "CreateIndex",
+        "CreatePipelineDataset", "CreatePipelineInsertIntoFlow"
+      ],
+      "description": "Effect WRITE_SCHEMA. Additive or reversible, so REVIEW rather than DENY. Relaxing this rule does not open a silent hole: the genuinely destructive forms on this path (DROP COLUMN, REPLACE COLUMNS, DROP CONSTRAINT) are caught by the deny rules above. The 4.1 additions -- constraints, DEFAULT COLLATION, CLUSTER BY, ALTER VIEW ... WITH SCHEMA BINDING -- are all in this tier, as are the pipeline labels despite their names: CreatePipelineDataset is what the grammar calls CREATE MATERIALIZED VIEW / CREATE STREAMING TABLE, and CreatePipelineInsertIntoFlow is CREATE FLOW ... AS INSERT INTO ..., whose flow body is a parsed INSERT and gets no rule of its own beyond this."
+    },
+    {
+      "id": "review.session-state",
+      "verdict": "review",
+      "reason": "unsupported_statement",
+      "message": "changes session or runtime state (SET / RESET / CACHE / TIME ZONE / session variables); needs review",
+      "severity": "medium",
+      "labels": [
+        "SetConfiguration", "SetQuotedConfiguration", "ResetConfiguration",
+        "ResetQuotedConfiguration", "SetTimeZone", "SetVariable",
+        "SetVariableInsideSqlScript", "CreateVariable", "DropVariable",
+        "CacheTable", "UncacheTable", "ClearCache"
+      ],
+      "description": "Effect CHANGE_CONFIG. One SET changes how every later statement in the session behaves -- warehouse dir, extraJavaOptions, S3 credentials, shuffle partitions -- so it cannot be judged one line at a time. The 4.1 session-variable statements (DECLARE VARIABLE, SET VARIABLE, DROP TEMPORARY VARIABLE, and the script-only bare `SET <var> = ...`, which is SetVariableInsideSqlScript rather than SetVariable) are in the same tier: they change state a later statement reads. Note you cannot narrow this with `literal_prefixes` either: the grammar matches `SET configKey` with a wildcard, so the key is not extracted as a string literal and a prefix list would never match."
+    },
+    {
+      "id": "review.indirect-execution",
+      "verdict": "review",
+      "reason": "unsupported_statement",
+      "message": "runs a stored procedure or SQL held in an expression (CALL / EXECUTE IMMEDIATE); needs review",
+      "severity": "medium",
+      "labels": ["Call", "VisitExecuteImmediate"],
+      "description": "Effect REACHES_EXTERNAL. A CALL's procedure body is not in the SQL text, so its effects are genuinely unbounded. EXECUTE IMMEDIATE is the gentler case: screen() extracts each hidden statement and screens it under this same policy, so `EXECUTE IMMEDIATE 'DROP TABLE t'` also produces a DENY finding for the DropTable payload and the report aggregates to DENY -- the outer REVIEW here covers the indirection, not the payload. 4.1 is the first pinned grammar with an EXECUTE token at all."
+    },
+    {
+      "id": "review.sql-function",
+      "verdict": "review",
+      "reason": "unsupported_statement",
+      "message": "creates a SQL-bodied function (CREATE FUNCTION ... RETURN <query|expression>); needs review",
+      "severity": "medium",
+      "labels": ["CreateUserDefinedFunction"],
+      "description": "Effect WRITE_SCHEMA + LOAD_CODE per the shipped effect table, which flags the whole CREATE FUNCTION family conservatively. The 4.1 grammar's shape for this label is a function whose body is a parsed query or expression -- not a class path -- so this file reviews it rather than denying: the body is readable SQL, and the class-loading form (CREATE FUNCTION ... AS 'class' USING resource) is CreateFunction and is denied above. Change this rule's verdict to deny if your estate wants the entire FUNCTION family refused."
+    },
+    {
+      "id": "allow.query",
+      "verdict": "allow",
+      "reason": "no_matching_rule",
+      "message": "read-only query",
+      "severity": "info",
+      "labels": ["StatementDefault", "ShowTableExtended", "ShowTblProperties"],
+      "description": "The only label allowed outright: a plain query. USE, USE NAMESPACE, SET CATALOG, SHOW* (including SHOW PROCEDURES), DESCRIBE* (including DESCRIBE PROCEDURE), EXPLAIN, ANALYZE, REFRESH*, COMMENT*, CREATE NAMESPACE and CREATE VIEW are all in the read-only label set and fall through to ALLOW without needing a rule of their own -- but the built-in read-only list misses SHOW TABLE EXTENDED and SHOW TBLPROPERTIES, so without an explicit rule here those two catalog reads would report REVIEW; they are named on this rule rather than trusted to a list this file does not own. The wrapper labels (DmlStatement, SingleInsertQuery, MultiInsertQuery) are deliberately absent: the tree walk descends through them to the resolved statement, so a rule keyed on a wrapper would never fire. The script control-flow labels (SearchedCaseStatement, SimpleCaseStatement) are deliberately absent too -- see the header: they have no effect of their own but they hide their bodies, so they must land on REVIEW, never ALLOW."
+    }
+  ],
+
+  "limits": {
+    "max_code_chars": 20000,
+    "max_sql_chars": 10000,
+    "max_statements": 200,
+    "max_literals": 100,
+    "max_targets": 100
+  }
+}
