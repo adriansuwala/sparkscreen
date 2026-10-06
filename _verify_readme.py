@@ -119,8 +119,21 @@ df.write.mode("overwrite").saveAsTable("prod.events_v2")
 
     # --- version and wheel claims ---
     import sparkscreen as _pkg
-    check("README version claim matches the package",
-          "0.8.0" in readme and _pkg.__version__ == "0.8.0", True)
+    # The README deliberately carries NO version literal. The number lives in
+    # pyproject.toml, CHANGELOG.md and the GitHub Releases page; a copy here was one
+    # more site a release had to bump, and the failure mode was the audit -- not a
+    # user -- noticing. Spark engine versions (3.5.1, 4.1.3, ...) are legitimate
+    # claims and stay. What this rejects is the *package's own* version appearing:
+    # if the current version is ever mentioned, the audit fails and points at the
+    # three places that do own it.
+    if _pkg.__version__ in readme:
+        failures.append(
+            f"README names the package version {_pkg.__version__!r}. The version "
+            "lives in pyproject.toml, CHANGELOG.md and the Releases page; say "
+            "'the GitHub Releases page' instead of a number.")
+    else:
+        print("  OK   README carries no package-version literal")
+    check("README states the pre-1.0 stance", "Not 1.0 yet" in readme, True)
     whl = sorted((ROOT / "dist").glob("*.whl"))
     if whl:
         import zipfile
