@@ -291,6 +291,16 @@ swap, which is atomic and recoverable from the staging copy.
 
 ## Known limitations
 
+There is a second, runtime surface for the Jupyter-kernel deployment: the Spark
+Connect **plan gate**. `sparkscreen.plans.screen_plan(plan, policy)` screens a
+`Plan` proto directly, and `sparkscreen.connect.install_gate(client)` wraps a
+Spark Connect client so every request it sends is screened before it leaves the
+process — `DENY` and `UNKNOWN` raise `sparkscreen.connect.ScreenedCommandError`
+(a `PermissionError`) instead of the request being sent. Both need pyspark's
+Connect proto modules (no JVM). Deployment recipes — the IPython startup hook,
+the shadowing kernelspec, and the classic-session EXPLAIN fallback — live in
+`examples/connect-gate/README.md` in the repository.
+
 - DataFrame API writes are not detected (above) — the largest gap.
 - Interprocedural constants resolve only from literal call sites that all agree, and loops unroll only over literal lists and tuples. Recursion, decorators, generators, methods, `*args`/`**kwargs`, and disagreeing call sites stay `UNKNOWN`
   even when every caller passes a literal.
