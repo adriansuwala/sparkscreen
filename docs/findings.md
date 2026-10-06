@@ -1022,3 +1022,66 @@ statement that has existed since Spark 3.x. The invariant that a crash means an 
 **Found while reviewing** `policies/default-spark-3.5.1.jsonc` (the first file
 `--init-policy` will emit): the policy file is not implicated — the crash happens before
 any policy rule is consulted, under the built-in default too.
+
+## F27 — sparkscreen accepts SQL all three engines reject at the AST layer
+
+**Status: open, tracked as `sparkscreen-ast-layer-rejections-f27-egl` — the decision it
+needs is named at the end of this finding.** Found by the
+mutation fuzz on its first sweep (`experiments/spike/fuzz_differential.py`), confirmed on
+live pyspark 3.5.1, 4.1.3 and 4.2.0 via `parsePlan`.
+
+    set( spark.sql.shuffle.partitions=200)          # engine: INVALID_SET_SYNTAX
+    SET (spark.sql.shuffle.partitions=200)          # engine: INVALID_SET_SYNTAX
+    alter table t add column b intunion             # engine: UNSUPPORTED_DATATYPE
+    alter table t add column b partitionint         # engine: UNSUPPORTED_DATATYPE
+    ALTER TABLE t ADD COLUMN b unionINT             # engine: UNSUPPORTED_DATATYPE
+
+All three are accepted by every pinned grammar (`SetConfiguration`, `AddTableColumns`)
+and rejected by all three engines. This is not a port bug: the ports faithfully match the
+vendored `.g4` files, and the `.g4` files match the engine's *grammar*. The rejection
+happens after the grammar, in the engine's AST builder — `INVALID_SET_SYNTAX` is raised by
+`visitSetConfiguration` against the shape `SET .*?` deliberately permits, and
+`UNSUPPORTED_DATATYPE` is the engine naming the unsupported type after its type rule
+matched an ordinary identifier. The grammar admits the input so the engine can attach a
+better message; the message is a `ParseException`, so `parsePlan` counts it as rejected.
+
+**The two failing directions are different risks, and only this one is a defect.** The
+fuzz also watched the other direction — we rejecting what an engine accepts — and found
+zero instances on all three engines, across 540 mutants each. Every false verdict this
+class can produce is a verdict on SQL that never runs; nothing that would execute is
+misanalysed. The screened verdicts stay fail-closed (`REVIEW` for the `SET` shape,
+`DENY` for the alter-table shapes), so the cost is screener health: a confident verdict
+on dead SQL and a differential suite that reports drift forever, not a wrong verdict on
+live SQL.
+
+**Recorded, not fixed, on this branch.** `KNOWN_AST_LAYER_REJECTIONS` in
+`tests/differential/corpus.py` holds five engine-observed reproducers with their error
+classes — the first three being the *complete* divergence set of the deterministic sweep
+in `tests/differential/test_fuzz_against_real_spark.py` (fixed seed, 190 cases, identical
+on all three engines, computed by `experiments/spike/probe_sweep_divergences.py`) — out
+of `CORPUS` on purpose, since a `CORPUS` row asserts our parser already agrees, which it
+does not. The parse-acceptance xfail in `tests/test_properties.py` pins the current
+behaviour JVM-free, parametrized over the same table, and the sweep test treats a
+we-accept/engine-reject outside it as a hard failure, so the class cannot grow unnoticed.
+A new mutant shape in this class needs a new row in that table and a line in this
+finding, not a red suite by accident.
+
+**The decision this is waiting on.** `parse()`'s contract today is "the grammar accepts".
+The differential suite's asymmetry demands "the engine's parser accepts". Closing the gap
+means modelling AST-layer validation for the shapes the engines reject — a SET-shape
+check and a type-name check — and both need live-engine verification of the full rule
+they implement (the set shapes per engine version, the supported type universe), or the
+fix will be stricter than some engine and the harness will flag it as drift in the other
+direction. Until that decision, the gap is tracked rather than owned.
+
+**Where the fuzz layer stands after this sweep.** The pre-existing property tests
+replayed fixed seed pools; section 5 of `tests/test_properties.py` mutates the seeds so
+Hypothesis invents shapes nobody wrote down, JVM-free, guarding the verdict-level
+contract (destructive effects never ALLOW, unparseable never ALLOW, cross-grammar
+destructive never ALLOW). This module adds the parse-acceptance check that needs the
+engine. Between them: verdicts are fuzzed without a JVM, and parse acceptance is fuzzed
+wherever an engine is installed. The first sweeps' numbers: 1500 seeded mutants × 3
+grammars, 548 parsed, 203 destructive, zero verdict-level violations; 540 exploratory
+mutants × 3 engines, six hits over three unique divergent shapes (this finding), zero
+false rejects; and the deterministic promoted sweep, 190 cases × 3 engines, three
+divergences (recorded above), zero false rejects.

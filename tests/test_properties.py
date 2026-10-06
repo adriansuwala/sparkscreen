@@ -45,8 +45,11 @@ from hypothesis import strategies as st
 from sparkscreen.grammar.parser import SqlParser, SqlSyntaxError, get_parser
 from sparkscreen.grammar.port import PortError, port_grammar
 from sparkscreen.grammar.spec import SPECS, GrammarSpec
-from sparkscreen.model import UNKNOWN_REASONS, Verdict
+from sparkscreen.analysis.effects import effects_for_label
+from sparkscreen.model import UNKNOWN_REASONS, Effect, Verdict
 from sparkscreen.screen import screen
+
+from differential.corpus import KNOWN_AST_LAYER_REJECTIONS
 
 pytestmark = pytest.mark.fuzz
 
@@ -678,3 +681,214 @@ def test_unused_rewrites_are_surfaced_propertywise():
             )
             total += len(result.unused_rules)
     assert total == 0, f"{total} rewrites no longer match any pinned grammar"
+
+
+# ===========================================================================
+# 5. MUTATION FUZZ -- inputs nobody wrote down
+# ===========================================================================
+#
+# Sections 1-3 fuzz with fixed seed *pools*: Hypothesis replays inputs someone
+# already enumerated and cannot invent a shape nobody wrote down. This section
+# mutates the seeds with token-level operators so the generated SQL is genuinely
+# new. Promoted from experiments/spike/fuzz_no_false_allow.py, which swept 1500
+# seeded mutants across all three grammars before this existed.
+
+#: Effects the default policy must never wave through. `READ_DATA`-only and
+#: additive `WRITE_SCHEMA` findings are legitimately ALLOW-able, so "any effect"
+#: is the WRONG predicate -- sharpened after the spike's first draft flagged 264
+#: correct ALLOWs. The verify-what-failed discipline from docs/agents.md applied
+#: to the test itself.
+_MUST_NOT_ALLOW = frozenset({Effect.DESTROY_DATA, Effect.LOAD_CODE})
+
+_FUZZ_KEYWORDS = (
+    "drop", "select", "from", "where", "table", "insert", "union", "join",
+    "delete", "values", "as", "on", "by", "not", "over", "partition",
+)
+
+_FUZZ_TAILS = (
+    ";", " limit 1", " union", " group by a", " 'unterminated",
+)
+
+_MUTATIONS = ("delete", "duplicate", "swap", "insert_keyword", "wrap_parens", "append_tail")
+
+
+def _tokenize(sql: str) -> list[str]:
+    out: list[str] = []
+    for word in sql.split(" "):
+        if word:
+            out.append(word)
+        out.append(" ")
+    if out and out[-1] == " ":
+        out.pop()
+    return out
+
+
+@st.composite
+def _mutated_sql(draw):
+    """A seed statement distorted by 1-3 token-level mutations.
+
+    Every choice is a drawn Hypothesis value, so a failing input shrinks back to
+    the seed and the smallest op sequence that breaks it. Mutation position is
+    clamped, not filtered -- an out-of-range `i` on an already-shortened token
+    list is a valid mutant, not an invalid example.
+    """
+    sql = draw(st.sampled_from(SEED_SQL))
+    ops = draw(st.lists(st.sampled_from(_MUTATIONS), min_size=1, max_size=3))
+    pos = draw(st.integers(min_value=0, max_value=80))
+    kw = draw(st.sampled_from(_FUZZ_KEYWORDS))
+    tail = draw(st.sampled_from(_FUZZ_TAILS))
+    toks = _tokenize(sql)
+    for op in ops:
+        if not toks:
+            break
+        i = min(pos, len(toks) - 1)
+        if op == "delete":
+            del toks[i]
+        elif op == "duplicate":
+            toks.insert(i, toks[i])
+        elif op == "swap" and i + 1 < len(toks):
+            toks[i], toks[i + 1] = toks[i + 1], toks[i]
+        elif op == "insert_keyword":
+            toks.insert(i, kw)
+        elif op == "wrap_parens":
+            toks.insert(i, "(")
+            toks.append(")")
+        elif op == "append_tail":
+            toks.append(tail)
+    return "".join(toks).strip()
+
+
+def _screen_one(key: str, sql: str):
+    """Screen `spark.sql(<sql>)` under one grammar. repr() embeds the SQL, so
+    mutants containing quotes or backticks cannot corrupt the generated source."""
+    return screen(f"import pyspark\nspark.sql({sql!r})\n", spec=key)
+
+
+@given(key=st.sampled_from(KEYS), sql=_mutated_sql())
+def test_mutated_sql_never_reaches_an_unmapped_label(key, sql):
+    """PROPERTY: a mutant either parses or raises SqlSyntaxError, and every
+    parsed label maps to effects.
+
+    The totality properties in section 1 use arbitrary text and a seed pool; a
+    *structured* mutant exercises the tree walker differently -- near-miss
+    syntax that reuses real rules. Two failure classes matter here: an
+    undeclared exception escaping parse() (crashes `screen()`, whose callers
+    catch only SqlSyntaxError), and UnmappedLabelError (policy over a label the
+    table missed). The latter is fail-loud by design -- this test is what keeps
+    the fail-loud path covered by inputs no one hand-wrote.
+    """
+    try:
+        statement = _parser(key).try_parse(sql)
+    except Exception as e:  # noqa: BLE001 - that is the assertion
+        pytest.fail(f"{key}: {type(e).__name__} escaped try_parse(): {e!r}\ninput={sql!r}")
+    if statement is not None:
+        assert statement.label
+        effects_for_label(statement.label)  # raises UnmappedLabelError on a miss
+
+
+@given(key=st.sampled_from(KEYS), sql=_mutated_sql())
+def test_mutant_with_unparseable_sql_is_never_allowed(key, sql):
+    """PROPERTY: ALLOW is only ever returned for SQL that actually parsed.
+
+    A mutant that no longer parses must screen to UNKNOWN, REVIEW or DENY --
+    never ALLOW. This is the crudest fail-open shape possible: the screener
+    certifying code it could not even read. Spelled against try_parse rather
+    than screen internals so it holds however the pipeline grows.
+    """
+    parsed = _parser(key).try_parse(sql) is not None
+    report = _screen_one(key, sql)
+    if not parsed:
+        assert report.verdict is not Verdict.ALLOW, (
+            f"{key}: ALLOW for unparseable mutant {sql!r}: {report.summary()}"
+        )
+
+
+@given(key=st.sampled_from(KEYS), sql=_mutated_sql())
+def test_mutant_with_destructive_effects_is_never_allowed(key, sql):
+    """PROPERTY: a mutant that still parses to a DESTROY_DATA/LOAD_CODE label
+    must not screen to ALLOW, whatever the surrounding mutation did.
+
+    Token mutations can garble the statement text without changing its parse
+    tree ("drop  table prod.users", "DROP TABLE prod.users" with a duplicated
+    keyword). The effect layer keys on the tree, so a destructive label with an
+    ALLOW verdict means the policy layer disagreed with the effect layer -- the
+    fail-open direction this whole suite exists to prevent.
+    """
+    statement = _parser(key).try_parse(sql)
+    if statement is None:
+        return
+    effects = effects_for_label(statement.label)
+    if not (effects & _MUST_NOT_ALLOW):
+        return
+    report = _screen_one(key, sql)
+    assert report.verdict is not Verdict.ALLOW, (
+        f"{key}: {sql!r} parses to {statement.label} with "
+        f"{sorted(map(str, effects & _MUST_NOT_ALLOW))} but screened ALLOW: "
+        f"{report.summary()}"
+    )
+
+
+@given(sql=_mutated_sql())
+def test_mutant_destructive_under_any_grammar_is_not_allowed_under_any(sql):
+    """PROPERTY: if ANY pinned grammar parses a mutant to a destructive label,
+    no pinned grammar may screen it ALLOW.
+
+    The cross-grammar generalisation of the property above. The grammars are
+    one lineage pinned at three commits, so a destructive statement should be
+    destructive on every version that accepts it; a version that cannot parse
+    it reports UNKNOWN, which is fail-closed. The one thing that must never
+    happen is version A refusing to parse a statement version B calls a drop.
+    """
+    destructive = False
+    for key in KEYS:
+        statement = _parser(key).try_parse(sql)
+        if statement is not None and (
+            effects_for_label(statement.label) & _MUST_NOT_ALLOW
+        ):
+            destructive = True
+            break
+    if not destructive:
+        return
+    for key in KEYS:
+        report = _screen_one(key, sql)
+        assert report.verdict is not Verdict.ALLOW, (
+            f"{key}: ALLOW for {sql!r}, destructive under another pinned grammar: "
+            f"{report.summary()}"
+        )
+
+
+# ===========================================================================
+# Known source bugs -- parse acceptance (F27)
+# ===========================================================================
+
+
+@pytest.mark.xfail(strict=False, reason=(
+    "F27 (parse acceptance, AST layer): the engine's grammar accepts these but the "
+    "engine itself rejects them before the statement is built -- INVALID_SET_SYNTAX "
+    "for `SET ( ... )` (the grammar's `SET .*?` alternative matches; the AST builder "
+    "validates the shape) and UNSUPPORTED_DATATYPE for a column type that is an "
+    "ordinary identifier. Confirmed on live 3.5.1 / 4.1.3 / 4.2.0 via parsePlan; our "
+    "parser keys on the grammar and accepts on all three. Screened verdicts stay "
+    "fail-closed (REVIEW and DENY), so this costs a confident verdict on SQL the "
+    "engine will never run -- screener health, not a security hole. Recorded as "
+    "KNOWN_AST_LAYER_REJECTIONS in tests/differential/corpus.py; see F27 for the "
+    "decision this gap is waiting on."
+))
+@pytest.mark.parametrize("key", KEYS)
+@pytest.mark.parametrize(
+    "sql",
+    [sql for sql, _ in KNOWN_AST_LAYER_REJECTIONS],
+    ids=[sql for sql, _ in KNOWN_AST_LAYER_REJECTIONS],
+)
+def test_ast_layer_rejections_are_refused_like_the_engine(key, sql):
+    """PROPERTY: parse acceptance agrees with the engine, not just with the grammar.
+
+    The differential suite's asymmetry says we may reject what the engine accepts
+    but must not accept what it rejects. These mutants are rejected by all three
+    live engines at the AST layer while our parsers accept them, so this is the
+    property they break. It is xfail, not strict: fixing acceptance means deciding
+    whether `parse()` models AST-layer validation (see F27), and a wrong strict
+    expectation here would encode the grammar-only reading as truth.
+    """
+    with pytest.raises(SqlSyntaxError):
+        _parser(key).parse(sql)

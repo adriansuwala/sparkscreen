@@ -58,6 +58,34 @@ Measures what a constant-propagation pass can actually recover. It recovers f-st
 parameters and dict lookups. Those give-ups are the UNKNOWN verdict — see
 `sparkscreen.model.Reason.UNRESOLVED_DYNAMIC_SQL`.
 
+## spike/fuzz_no_false_allow.py
+
+The first fuzz sweep, JVM-free: 1500 seeded token-level mutants of the corpus across all
+three pinned grammars, plus probes of every documented folding path. Zero verdict-level
+violations — destructive mutants never ALLOW, unparseable mutants never ALLOW, and all
+eight folding paths recovered a planted `drop table prod.users`. Also the source of a
+test bug worth keeping: its first draft asserted "nonempty effects ⇒ never ALLOW" and
+flagged 264 *correct* ALLOWs, because `READ_DATA`-only and additive `WRITE_SCHEMA`
+findings are legitimately allowed under the default policy. The property was sharpened to
+`DESTROY_DATA`/`LOAD_CODE` before promotion into `tests/test_properties.py` section 5.
+
+## spike/fuzz_differential.py
+
+The same mutation generator pointed at live engines via `parsePlan` (the parse-only
+oracle — it throws on syntax errors and never executes, so CREATE/INSERT mutants cannot
+touch the warehouse). Same seeded case list on every engine, so results are comparable.
+First sweep: 540 cases × 3.5.1 / 4.1.3 / 4.2.0, zero false rejects and six false
+accepts — all one class, now F27. This is what found F27; the corpus and the 34
+pre-existing property tests had both passed everything for weeks.
+
+## spike/probe_engine_messages.py
+
+Ran the F27 reproducers back through `parsePlan` to capture the engine's own exception
+text. That text is what settled the mechanism: `INVALID_SET_SYNTAX` and
+`UNSUPPORTED_DATATYPE` are AST-builder rejections against a grammar-level accept, not
+grammar drift — the ports agree with the `.g4` files, and the `.g4` files agree with the
+engine's grammar. Without the messages, the natural wrong move is "fix the port".
+
 ## Case sensitivity (found later, against a real Spark install)
 
 Both ports initially rejected every lowercase statement — `select 1`, `drop table t`,

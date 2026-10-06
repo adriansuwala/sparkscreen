@@ -156,6 +156,36 @@ BOTH_FOUR_X_ACCEPTED_WITHOUT_ENGINE_AGREEMENT: tuple[str, ...] = (
 )
 
 
+#: Constructs where the engine's *grammar* accepts but the engine itself rejects
+#: before the statement is built. Discovered by the mutation fuzz (F27), confirmed on
+#: live 3.5.1 / 4.1.3 / 4.2.0 via `parsePlan`. The engine's *grammar* accepts each of
+#: these -- `SET .*?` matches the first family, and the type rule deliberately matches
+#: an identifier for the second -- but the engine's AST builder rejects them with the
+#: error class recorded per row. sparkscreen parses with the grammar and therefore
+#: accepts them: the recorded divergence class. Screened verdicts stay fail-closed
+#: (REVIEW and DENY respectively), so the gap costs a confident verdict on SQL the
+#: engine will never run, not a wrong verdict on SQL it will.
+#:
+#: The first three rows are the complete divergence set of the deterministic sweep in
+#: `test_fuzz_against_real_spark.py` (fixed seed, 190 cases, identical on all three
+#: engines, computed by `experiments/spike/probe_sweep_divergences.py`). The last two
+#: were observed by the exploratory sweep in `experiments/spike/fuzz_differential.py`.
+#: All five were engine-observed, not inferred. A new sweep member must be added here
+#: deliberately -- the sweep test fails on any divergence outside this table, and the
+#: message names this file.
+#:
+#: Not in `CORPUS` on purpose: a CORPUS row asserts our parser already agrees, which
+#: it does not. These stay here until the decision in F27 either fixes acceptance or
+#: records it as deliberate, at which point the rows graduate.
+KNOWN_AST_LAYER_REJECTIONS: tuple[tuple[str, str], ...] = (
+    ("SET (spark.sql.shuffle.partitions=200)", "INVALID_SET_SYNTAX"),
+    ("set( spark.sql.shuffle.partitions=200)", "INVALID_SET_SYNTAX"),
+    ("ALTER TABLE t ADD COLUMN b unionINT", "UNSUPPORTED_DATATYPE"),
+    ("alter table t add column b intunion", "UNSUPPORTED_DATATYPE"),
+    ("alter table t add column b partitionint", "UNSUPPORTED_DATATYPE"),
+)
+
+
 def real_spark_verdict(spark_session, sql: str) -> bool:
     """True when `spark.sql(sql)` gets past *parsing*.
 
