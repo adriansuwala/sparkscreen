@@ -354,3 +354,48 @@ building at all", and the answer feeds T5's "both" leaning.
 **Would change our mind** if plan-text shapes prove unstable across engine *patch*
 releases — then only the wire-level (T2) form survives, and EXPLAIN downgrades to a test
 fixture.
+
+### T8 addendum — the grammar for plans exists, and it ships in the wheel (2026-10-06)
+
+Probing T8 surfaced the answer to its implicit question — *what would the plan oracle
+parse?* There is no grammar for EXPLAIN text; the plan that *has* a grammar is the
+Spark Connect protobuf, and every pinned pyspark wheel ships it:
+
+- `pyspark/sql/connect/proto/*.pyi` + `*_pb2.py` (needs `grpcio` only for the transport,
+  not the messages): `Relation` carries a **closed oneof of 51 kinds** on 3.5.1, 59 on
+  4.1.3; `Command` carries **11 kinds on 3.5.1, 20 on 4.1.3**. Enumerated live from
+  `DESCRIPTOR.oneofs`, not from a corpus — the same "derived universe" discipline the
+  label mapping uses.
+- The policy-relevant fields are **typed enums**, not rendered text:
+  `WriteOperation.SaveMode` (APPEND/OVERWRITE/ERROR_IF_EXISTS/IGNORE) and
+  `WriteOperationV2.Mode` (CREATE/OVERWRITE/OVERWRITE_PARTITIONS/APPEND/REPLACE/
+  CREATE_OR_REPLACE, plus `overwrite_condition` as an Expression).
+- A hand-built walk resolved kind/target/mode to effect flags mechanically, including
+  the `SAVE_MODE_UNSPECIFIED` case, which is *structurally* visible and fails closed —
+  the plan-level twin of T5b's aliased-writer-judgment. An unset oneof reports `None`,
+  never a guess.
+
+**The T4-shaped integration is real and smaller than the SQL one.** `sql_command` carries
+the raw SQL string, so the ANTLR pipeline and `LABEL_EFFECTS` stay the SQL source of
+truth and the proto screen *delegates* to them — the plan table only covers what plans
+actually carry natively: writes, merges, function/DataSource registration (LOAD_CODE),
+streaming/checkpoint commands. That is roughly a dozen entries, each mapping to the
+existing `Effect` flags, keyed on kind (+mode). D4's coarse-orthogonal requirement holds:
+nothing in the proto needs a new flag.
+
+Two honest mismatches with the T4 framing:
+
+- T4 imagined *third-party* catalogues; this is Spark's own catalogue. Still worth doing
+  — it exercises the Effect contract on a second backend, which is the forcing function
+  T6 wanted.
+- Version churn is real but cheap to pin: kind sets grew 51→59 and 11→20 between
+  3.5.1 and 4.1.3, and `SqlCommand` field names changed under them. The wheel version
+  is the pin, the same matrix as the grammars, and additive new kinds fail closed into
+  UNKNOWN rather than mis-mapping.
+
+This upgrades T2's feasibility note from "would see every plan" to a concrete, verified
+shape: a wrapper over the client's plan builder (or a wire proxy) walking
+`Plan.command`/`Plan.root`, mapping the closed kind universe to `Effect`, delegating
+`sql_command` to the existing pipeline. The EXPLAIN path (above) then downgrades from
+"backend input" to *differential oracle for the delegation* — it is how you prove the
+ANTLR path saw what the engine saw.
