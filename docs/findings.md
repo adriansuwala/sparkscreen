@@ -978,3 +978,47 @@ asserts the extraction is non-empty, so the parse guard cannot pass vacuously ei
 repository's own scripts is real evidence and was never in question — it passed, truthfully,
 about a different file. The step that was broken was the one made of text inside YAML, seen
 by no tool in this repo, including the two guards written to see it.
+
+## F26 — a valid Spark statement crashes the CLI: `FROM`-led multi-target INSERT
+
+**Status: open, tracked as `sparkscreen-from-clause-crash-p9f`.** Reproduced on all three
+pinned grammars; no fix on this branch.
+
+    spark.sql('FROM s INSERT INTO TABLE prod.t SELECT *')
+
+is valid Spark SQL on 3.x and 4.x — the `FROM`-first form of `INSERT`. sparkscreen exits
+with an `UnmappedLabelError` traceback ("no effect classification for statement label
+'FromClause'") instead of a verdict.
+
+**Mechanism.** The statement parses with a top-level `FromClause` context — the
+statement-shaped `fromClause` alternative, which contains *both* a `Relation` and the
+`insertInto`. `FromClause` is not in `treewalk.WRAPPER_LABELS`, so `effective_label()`
+returns it unchanged and the statement's real kind (`InsertIntoTable`, reached through
+`DmlStatement` > `SingleInsertQuery`) is never extracted. `FromClause` has no
+`LABEL_EFFECTS` entry, `effects_for_label` raises, and `screen()` deliberately lets that
+propagate. The CLI has no handler for it, so a parseable, years-old statement kills the
+process.
+
+**Why the derivation missed it.** `analysis/label_universe.py` derives the label universe
+from the generated parsers, extending the frontier through `_is_wrapper` labels.
+`FromClause` is not a wrapper, so the derivation treats it as a statement kind it would
+return — but it is absent from the derived universe, because it is reached as an
+*unlabeled* rule child of `singleStatement` / `compoundOrSingleStatement`, not as a labeled
+alternative. The universe therefore does not contain a label the parser demonstrably
+produces, and the effects-coverage test (which walks the same universe) could not see the
+gap. A derivation and its runtime disagreeing is the failure shape F8/F9/F13 share.
+
+**Why the obvious fix is wrong.** Adding `FromClause` to `WRAPPER_LABELS` makes
+`effective_label` descend to the first non-wrapper inner context — which is `Relation`,
+also unmapped and also not the statement kind. The kind must come from the `insertInto`
+branch. This is treewalk surgery in the class that produced F8/F9/F13, and it needs
+live-engine differential verification before it lands.
+
+**Also wrong: the crash's own justification.** `_eval_one` says the raise "can only fire
+when a grammar has gained a statement the table has not caught up with". It fires on a
+statement that has existed since Spark 3.x. The invariant that a crash means an unmapped
+*new* label is not held; the crash is reachable by plain old SQL.
+
+**Found while reviewing** `policies/default-spark-3.5.1.jsonc` (the first file
+`--init-policy` will emit): the policy file is not implicated — the crash happens before
+any policy rule is consulted, under the built-in default too.

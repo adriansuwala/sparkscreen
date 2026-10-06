@@ -4,6 +4,7 @@
     sparkscreen --spark 3.5.1 --json code.py
     cat code.py | sparkscreen -
     sparkscreen --policy company.json code.py
+    sparkscreen --init-policy --spark 4.2 > policy.jsonc
 
 Exit codes are the point of this tool, because it is meant to gate an automated
 pipeline:
@@ -19,6 +20,7 @@ Exit 2 is deliberately distinct from 0. A CI step that treats "unparseable" as
 from __future__ import annotations
 
 import argparse
+import importlib.resources
 import json
 import sys
 from pathlib import Path
@@ -53,6 +55,23 @@ def _read(path: str) -> str:
     if path == "-":
         return sys.stdin.read()
     return Path(path).read_text()
+
+
+def _default_policy_text(spec_key: str) -> str:
+    """The editable default policy file shipped for this grammar, verbatim.
+
+    Served from the installed package (`policies/*.jsonc` is package data, see
+    pyproject.toml), so the command works from a wheel, not just a checkout. The
+    file is returned UNMODIFIED: its comments are the editable documentation, and
+    stripping them in transit would hand the user a file that no longer explains
+    itself. A grammar without a shipped file raises FileNotFoundError; callers
+    report the available files instead of pretending one exists.
+    """
+    name = f"default-{spec_key}.jsonc"
+    res = importlib.resources.files("sparkscreen").joinpath("policies").joinpath(name)
+    if not res.is_file():
+        raise FileNotFoundError(name)
+    return res.read_text(encoding="utf-8")
 
 
 def _render(report, use_color: bool) -> str:
@@ -90,10 +109,14 @@ def main(argv: list[str] | None = None) -> int:
         prog="sparkscreen",
         description="Screen PySpark for dangerous operations using real parsers.",
     )
-    ap.add_argument("path", help="Python file to screen, or '-' for stdin")
+    ap.add_argument("path", nargs="?", default=None,
+                    help="Python file to screen, or '-' for stdin")
     ap.add_argument("--spark", default=None,
                     help="Spark version or grammar key "
                          f"(one of: {', '.join(s.key for s in SPECS)})")
+    ap.add_argument("--init-policy", action="store_true",
+                    help="print the editable default policy file for --spark to "
+                         "stdout and exit 0 (requires --spark; no path argument)")
     ap.add_argument("--policy", default=None, help="path to a JSON policy file")
     ap.add_argument("--read-only", action="store_true",
                     help="use the strict read-only policy")
@@ -111,12 +134,6 @@ def main(argv: list[str] | None = None) -> int:
                   f"commit={s.commit} antlr={s.antlr_version}")
         return 0
 
-    try:
-        source = _read(args.path)
-    except OSError as e:
-        print(f"sparkscreen: cannot read {args.path}: {e}", file=sys.stderr)
-        return EXIT_UNKNOWN
-
     # Accept either a grammar key ("spark-3.5.1") or a bare Spark version ("3.5.1").
     # The flag advertises both, and resolving the bare form is what
     # `spec_for_spark_version` exists for -- without this the CLI advertised a
@@ -132,6 +149,45 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return EXIT_UNKNOWN
+
+    if args.init_policy:
+        if args.path is not None:
+            print("sparkscreen: --init-policy takes no path argument", file=sys.stderr)
+            return EXIT_UNKNOWN
+        # No --spark default, on purpose. The shipped files are per-grammar: the
+        # 3.5.1 and 4.2 label sets differ, so guessing one silently can hand a user
+        # a policy whose labels do not match their engine -- and the misses fail
+        # LENIENT (an uncovered statement falls through to a softer verdict), which
+        # is the direction that must never be reached by accident.
+        if not args.spark:
+            print(
+                "sparkscreen: --init-policy requires --spark. "
+                f"Known: {', '.join(sorted(SPEC_KEYS))}",
+                file=sys.stderr,
+            )
+            return EXIT_UNKNOWN
+        try:
+            sys.stdout.write(_default_policy_text(args.spark))
+        except FileNotFoundError:
+            pkg = importlib.resources.files("sparkscreen").joinpath("policies")
+            available = sorted(p.name for p in pkg.iterdir()
+                               if p.name.endswith(".jsonc"))
+            print(
+                f"sparkscreen: no default policy ships for {args.spark!r}. "
+                f"Shipped: {', '.join(available) or 'none'}",
+                file=sys.stderr,
+            )
+            return EXIT_UNKNOWN
+        return 0
+
+    if args.path is None:
+        ap.error("a path is required (or pass --init-policy to emit the default policy)")
+
+    try:
+        source = _read(args.path)
+    except OSError as e:
+        print(f"sparkscreen: cannot read {args.path}: {e}", file=sys.stderr)
+        return EXIT_UNKNOWN
 
     if args.policy:
         try:

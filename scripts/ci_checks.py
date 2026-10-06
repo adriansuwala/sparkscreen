@@ -248,7 +248,41 @@ def _audit_wheel(path: Path) -> str:
     ]
     if missing:
         raise CheckFailure(f"generated parsers missing from the wheel: {missing}")
-    return f"wheel ships all three parsers, no .g4, no .jar ({len(names)} entries)"
+
+    # The default policies ship: --init-policy reads them from the installed package,
+    # so a wheel without them breaks the documented starting point.
+    import re as _re
+
+    shipped = [n for n in names
+               if _re.fullmatch(r"sparkscreen/policies/default-spark-.+\.jsonc", n)]
+    expected = len([s for s in _POLICY_SPECS() if (ROOT / "src/sparkscreen/policies" /
+                                                   f"default-{s}.jsonc").exists()])
+    if len(shipped) < expected:
+        raise CheckFailure(
+            f"default policies missing from the wheel: found {shipped}, "
+            f"expected at least {expected}"
+        )
+    return (f"wheel ships all three parsers and {len(shipped)} default policy file(s), "
+            f"no .g4, no .jar ({len(names)} entries)")
+
+
+def _POLICY_SPECS():
+    """Grammar keys the checkout currently ships a default policy for.
+
+    Read from the tree rather than hardcoded, so adding a policy file for a new pin does
+    not require editing the wheel audit -- the audit follows the tree.
+    """
+    import re as _re
+
+    d = ROOT / "src" / "sparkscreen" / "policies"
+    if not d.is_dir():
+        return []
+    out = []
+    for p in sorted(d.glob("default-*.jsonc")):
+        m = _re.fullmatch(r"default-(spark-.+)\.jsonc", p.name)
+        if m:
+            out.append(m.group(1))
+    return out
 
 
 def check_wheel_installs_and_screens(wheel: Path | None = None) -> str:

@@ -504,5 +504,23 @@ def policy_from_dict(data: dict[str, Any]) -> Policy:
 
 
 def load_policy(path: str | Path) -> Policy:
-    data = json.loads(Path(path).read_text())
+    """Load a policy from disk. `.jsonc` files may carry comments and trailing commas.
+
+    The suffix decides, not a sniff of the content: a `.json` file that happens to contain
+    `//` is a broken `.json` file and must say so, rather than being silently accepted by a
+    parser the caller did not ask for. A policy is the one artefact here a human edits by
+    hand, so `.jsonc` is the format we ship defaults in -- see `jsonc.py` for why the
+    comment stripper is a scanner and not a regex.
+
+    Both paths raise `ValueError` subclasses on malformed input, which is what the CLI's
+    `except (OSError, ValueError, json.JSONDecodeError)` already turns into
+    `bad policy: ...`.
+    """
+    text = Path(path).read_text()
+    if Path(path).suffix.lower() == ".jsonc":
+        from .jsonc import loads as _jsonc_loads
+
+        data = _jsonc_loads(text)
+    else:
+        data = json.loads(text)
     return policy_from_dict(data)

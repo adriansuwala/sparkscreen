@@ -131,6 +131,29 @@ class TestWheelContents:
         assert not [n for n in names if n.endswith(".g4")], "grammar sources leaked"
         assert not [n for n in names if n.endswith(".jar")], "ANTLR jar leaked"
 
+    def test_wheel_ships_every_default_policy_the_checkout_has(self, built_wheel):
+        """`--init-policy` reads default policies from the installed package.
+
+        A wheel without them breaks the documented starting point for every user who
+        does not copy out of the repo -- and would do so silently, since the failure
+        surfaces only when someone runs `--init-policy`. The expectation is derived from
+        the checkout rather than hardcoded, so adding a policy file for a new pin needs
+        no edit here; this test then verifies the new file actually ships.
+        """
+        import zipfile
+
+        src_policies = ROOT / "src/sparkscreen/policies"
+        if not src_policies.is_dir():
+            pytest.skip("no policies directory in this checkout")
+        expected = sorted(p.name for p in src_policies.glob("default-*.jsonc"))
+        assert expected, "checkout ships no default policies; nothing to verify"
+
+        names = zipfile.ZipFile(built_wheel).namelist()
+        shipped = {n.rsplit("/", 1)[-1] for n in names
+                   if n.startswith("sparkscreen/policies/") and n.endswith(".jsonc")}
+        missing = [n for n in expected if n not in shipped]
+        assert not missing, f"default policies missing from the wheel: {missing}"
+
     def test_wheel_is_importable_with_no_jvm_on_path(self, built_wheel, tmp_path):
         """The real end-to-end check: install the artefact, hide java, screen code."""
         import os

@@ -1,0 +1,247 @@
+{
+  // sparkscreen default policy -- Spark 4.2
+  //
+  // Written for `sparkscreen --spark 4.2` or `--spark spark-4.2` (4.2.0 resolves to the
+  // same grammar). This is not a copy of the 3.5.1 edition with new labels pasted in:
+  // the 4.2 grammar splits and renames things the 3.5.1 file keys on, so several labels
+  // and comments differ where the grammars differ. See default-spark-3.5.1.jsonc for
+  // the 3.5.1-native version.
+  //
+  // This is JSONC: comments and trailing commas are allowed. The loader is
+  // sparkscreen.jsonc, which tracks string state -- which matters here, because
+  // `literal_prefixes` below contains values like "s3://" that a naive comment-stripper
+  // would eat.
+  //
+  // WHAT 4.x ADDS TO 3.5.1
+  //   * The entry rule is compoundOrSingleStatement, not singleStatement, so a screened
+  //     source can be a BEGIN...END script holding several `;`-separated statements. The
+  //     tree walk yields every statement in the script and these rules apply to each one.
+  //   * Those scripts add control flow -- IF, CASE, WHILE, FOR, LOOP, REPEAT -- and the
+  //     statement walk does not descend into their bodies. A DROP TABLE inside a CASE
+  //     block is therefore seen only as "a CASE statement" (verified: the walk reports
+  //     SearchedCaseStatement and nothing else). Two consequences, both deliberate:
+  //     there is no rule below that ALLOWs a CASE statement (an allow would be a
+  //     fail-open), and the control-flow labels take the generic review path like
+  //     everything else we cannot see inside. The other control-flow forms (IF, WHILE,
+  //     ...) carry no label a rule could match at all.
+  //   * EXECUTE IMMEDIATE exists in 4.x and not in 3.5.1; see review.dynamic-sql.
+  //
+  // HOW RULES MATCH
+  //   The FIRST rule whose `labels` contains the statement's resolved label wins, so
+  //   order is significant. A label appearing in two rules means the later rule is dead.
+  //   Labels are ANTLR statement labels, not regexes: `labels: ["DropTable"]` matches
+  //   DROP TABLE however it is spelled, including `"DR"+"OP TABLE t"`, because there is no
+  //   text matching anywhere in the pipeline.
+  //
+  // VERDICTS
+  //   deny   -- refuse. Use for irreversible loss and for arbitrary code execution.
+  //   review -- we know what it does; a human decides. Exit code 2, same as unknown.
+  //   allow  -- only ever for statements with no durable effect.
+  //
+  // WHY NOT JUST USE THE BUILT-IN DEFAULT?
+  //   `default_policy()` in policy.py is a reasonable conservative baseline, but it is
+  //   code, so it cannot be adjusted without a fork. Under the 4.2 grammar it also
+  //   carries two labels no 4.2 statement can produce (SetTableCollation and
+  //   InsertIntoPartition -- dead entries), and it has no rule for any of the
+  //   4.2-only statements (SET ROLE, the cursors, session variables, EXECUTE IMMEDIATE,
+  //   the INSERT ... REPLACE split), so those all land in the generic review path. This
+  //   file is the editable, 4.2-native version.
+
+  "name": "sparkscreen-defaults-4.2",
+
+  // NAMESPACES
+  //
+  // Empty on purpose, and this is the fail-closed state rather than a permissive one. See
+  // the writable_namespaces note below before filling either in.
+  //
+  // `writable_namespaces` / `readable_namespaces` are two INDEPENDENT checks, not
+  // alternatives: a statement can be writable in a namespace you may not read from, and
+  // both objections are raised. Patterns are per dot-separated component and `*` matches
+  // exactly ONE component, so `prod.*` matches `prod.users` but NOT `prod.staging.x` and
+  // not a bare `users`. A bare `"*"` matches anything, i.e. no restriction.
+  //
+  // `writable_namespaces` tightens statements that mutate data -- and, importantly, it is
+  // the ONLY thing that confirms a DataFrame write destination. Leave it empty and every
+  // `df.write.saveAsTable(...)` is reported REVIEW with "the destination could not be
+  // confirmed as in bounds", because an empty list is not permission to write.
+  "writable_namespaces": [],
+
+  // `readable_namespaces` tightens everything that reads, so a screen cannot exfiltrate
+  // PII out of a namespace you did not intend to open up.
+  "readable_namespaces": [],
+
+  "rules": [
+    {
+      "id": "deny.load-code",
+      "verdict": "deny",
+      "reason": "deny_rule",
+      "message": "adds a JAR/file resource or creates a function from one; this is arbitrary code loading",
+      "severity": "critical",
+      "labels": ["ManageResource", "CreateFunction", "CreateUserDefinedFunction"],
+      "description": "Effect LOAD_CODE. Unconditional: the jar path is agent-controlled, so no path pattern makes it safe. Note there is no path-based exemption available here -- the grammar matches the ADD JAR path with a `.*?` wildcard rather than a string-literal rule, so `literal_prefixes` cannot see it at all. Do not expect `literal_prefixes` to narrow this one. The third label is 4.x-only: the grammar splits function creation in two, `CREATE FUNCTION ... AS 'class' [USING jar...]` stays CreateFunction, while `CREATE FUNCTION ... RETURN <expression>` is CreateUserDefinedFunction -- the body is written inline and its LANGUAGE may be SQL or any identifier, so `LANGUAGE PYTHON` is arbitrary code the engine will run. If SQL UDFs are routine in your estate, split this rule and relax CreateUserDefinedFunction only."
+    },
+    {
+      "id": "deny.native-or-role",
+      "verdict": "deny",
+      "reason": "deny_rule",
+      "message": "SET ROLE, or a Hive native command the parser cannot inspect",
+      "severity": "critical",
+      "labels": ["FailNativeCommand", "FailSetRole"],
+      "description": "Two labels in 4.2 where 3.5.1 had one: the older grammar folded `SET ROLE ...` and the unsupported Hive native commands into a single alternative, while 4.2 gives the role spelling its own label, FailSetRole -- a session identity change. FailNativeCommand is now the `unsupportedHiveNativeCommands` alternative (CREATE ROLE, GRANT, REVOKE, LOCK TABLE, EXPORT/IMPORT TABLE, ...), which the parser is forbidden to look past: the tail is a `.*?` wildcard, so nothing in it is visible to analysis. Both are DENY: the first escalates privilege, the second escapes analysis. The `!cmd` shell escape is NOT a grammar alternative here either -- 4.x's BANG token is logical NOT -- so `!ls /` fails to parse and reports UNKNOWN (exit 2), the fail-closed outcome; the live 4.2.0 engine rejects it as well."
+    },
+    {
+      "id": "deny.local-filesystem",
+      "verdict": "deny",
+      "reason": "deny_rule",
+      "message": "LOAD DATA reads from a local path",
+      "severity": "critical",
+      "labels": ["LoadData"],
+      "description": "Effect READ_LOCAL_FS (plus WRITE_DATA and REACHES_EXTERNAL). This denies BOTH `LOAD DATA LOCAL INPATH` and the non-LOCAL form, because the 4.2 grammar still uses a single alternative for both (`LOAD DATA LOCAL? INPATH path=stringLit ...`) -- there is no separate label, so a policy cannot tell them apart, and the path is agent-controlled either way. If that is too strict for your pipelines, change this rule's `verdict` to `review`, or delete the rule. Note that `literal_prefixes` can only ESCALATE a verdict to deny, never relax one."
+    },
+    {
+      "id": "deny.destroy",
+      "verdict": "deny",
+      "reason": "deny_rule",
+      "message": "drops or truncates a table/view/namespace/function/index/constraint",
+      "severity": "critical",
+      "labels": [
+        "DropTable", "DropView", "DropNamespace", "DropFunction", "DropIndex",
+        "DropTablePartitions", "DropTableConstraint", "TruncateTable"
+      ],
+      "description": "Effect DESTROY_DATA. Irreversible: re-running the job does not restore the rows. `DropNamespace` takes the whole database with it, which is why it sits in the most severe group rather than the schema one. `DropTableConstraint` is 4.x's `ALTER TABLE ... DROP CONSTRAINT` -- it drops a constraint rather than rows, but the effect table carries DESTROY_DATA for it and the definition is gone when the job reruns; if constraints are metadata-only in your estate, move this one label to review.schema-mutation below."
+    },
+    {
+      "id": "deny.destroy-columns",
+      "verdict": "deny",
+      "reason": "deny_rule",
+      "message": "drops or replaces columns, losing their data",
+      "severity": "critical",
+      "labels": ["DropTableColumns", "HiveReplaceColumns"],
+      "description": "Effect DESTROY_DATA + WRITE_SCHEMA. Kept as its own rule rather than folded into deny.destroy so a team can relax table drops in a scratch namespace without silently permitting column loss. `ALTER TABLE ... REPLACE COLUMNS` looks structural but is a data loss event."
+    },
+    {
+      "id": "deny.overwrite",
+      "verdict": "deny",
+      "reason": "destructive_statement",
+      "message": "overwrites or replaces existing data (INSERT OVERWRITE / REPLACE TABLE / INSERT ... REPLACE)",
+      "severity": "critical",
+      "labels": [
+        "InsertOverwriteTable", "InsertOverwriteHiveDir", "InsertOverwriteDir",
+        "ReplaceTable", "InsertIntoReplaceBooleanCond", "InsertIntoReplaceUsing"
+      ],
+      "description": "Effect DESTROY_DATA. The 3.5.1 grammar keyed the REPLACE spellings on one label, InsertIntoReplaceWhere; 4.2 splits them in two, and both are DENY: `INSERT INTO t REPLACE WHERE (or ON) <predicate> ...` is InsertIntoReplaceBooleanCond and deletes every row the predicate selects, while `REPLACE USING <column list>` is InsertIntoReplaceUsing and redefines the table down to the listed columns. The ON spelling (`INSERT INTO t REPLACE ON a > 1 VALUES (2)`) is accepted by 4.2.0 -- recorded in the differential corpus -- and it is easy to read either spelling as a filter and get that backwards. Plain INSERT below is only REVIEW."
+    },
+    {
+      "id": "deny.external-location",
+      "verdict": "deny",
+      "reason": "deny_rule",
+      "message": "repoints an existing table or namespace at an external filesystem location",
+      "severity": "critical",
+      "labels": ["SetTableLocation", "SetNamespaceLocation"],
+      "description": "Effect REACHES_EXTERNAL + WRITE_SCHEMA. Treated as destruction of the old location rather than a schema tweak: after this, nothing points at the data any more, and a subsequent write lands wherever the agent chose."
+    },
+    {
+      "id": "deny.external-create-location",
+      "verdict": "allow",
+      "reason": "no_matching_rule",
+      "message": "creates a table, view, metric view or pipeline object",
+      "severity": "info",
+      "labels": [
+        "CreateTable", "CreateTableLike", "CreateTempViewUsing",
+        "CreateMetricView", "CreatePipelineDataset", "CreatePipelineInsertIntoFlow"
+      ],
+      "literal_prefixes": [
+        "s3://", "s3a://", "s3n://", "abfs://", "abfss://", "wasb://", "wasbs://",
+        "gs://", "gcs://", "hdfs://", "file:/", "file://", "/"
+      ],
+      "description": "Base verdict allow -- creating destroys nothing. The three 4.x-only labels are the metric view and the streaming-table/pipeline DDL (`CREATE STREAMING TABLE ...` is CreatePipelineDataset; the live 4.2.0 engine accepts it). The `literal_prefixes` list escalates this to DENY when a string literal in the statement starts with one of them, i.e. when the LOCATION points outside a managed warehouse. THIS IS THE ONE RULE MOST LIKELY TO NEED EDITING FOR YOUR ESTATE: the bare \"/\" prefix denies any absolute path, so if your warehouse is legitimately rooted at /mnt/warehouse, delete that one entry before use. Deleting the whole `literal_prefixes` list allows every location."
+    },
+    {
+      "id": "review.row-mutation",
+      "verdict": "review",
+      "reason": "destructive_statement",
+      "message": "mutates rows in place (DELETE / UPDATE / MERGE / INSERT); needs review to confirm the WHERE clause",
+      "severity": "high",
+      "labels": [
+        "DeleteFromTable", "UpdateTable", "MergeIntoTable", "InsertIntoTable"
+      ],
+      "description": "Effect WRITE_DATA, plus DESTROY_DATA on the first three. REVIEW rather than DENY because a correctly scoped DELETE is routine work -- but DESTROY_DATA is deliberately never certified harmless, so this cannot be ALLOW either; the screener cannot see that the WHERE clause is the right one. If you want row mutation gated rather than reviewed, change the verdict to deny."
+    },
+    {
+      "id": "review.repair",
+      "verdict": "review",
+      "reason": "destructive_statement",
+      "message": "walks the external filesystem to add or reconcile partitions (MSCK REPAIR / RECOVER PARTITIONS); needs review",
+      "severity": "high",
+      "labels": ["RepairTable", "RecoverPartitions"],
+      "description": "Effect REACHES_EXTERNAL + WRITE_SCHEMA. Both the cost and the blast radius scale with a path glob inside the table definition, which the screener cannot see. So a REVIEW on a table pointing at a broad prefix is a real warning, not noise."
+    },
+    {
+      "id": "review.schema-mutation",
+      "verdict": "review",
+      "reason": "destructive_statement",
+      "message": "changes table or view structure or properties without dropping data; needs review",
+      "severity": "medium",
+      "labels": [
+        "AlterTableAlterColumn", "HiveChangeColumn", "AddTableColumns",
+        "AddTablePartition", "RenameTable", "RenameTableColumn",
+        "RenameTablePartition", "SetTableProperties", "UnsetTableProperties",
+        "SetTableSerDe", "SetNamespaceProperties", "UnsetNamespaceProperties",
+        "AlterViewQuery", "AlterViewSchemaBinding", "CreateIndex",
+        "AlterTableCollation", "SetNamespaceCollation", "AlterClusterBy",
+        "AddTableConstraint"
+      ],
+      "description": "Effect WRITE_SCHEMA. Additive or reversible, so REVIEW rather than DENY. Relaxing this rule does not open a silent hole: the genuinely destructive forms on this path (DROP COLUMN, REPLACE COLUMNS) are caught by deny.destroy-columns above. The 4.x-only entries -- UnsetNamespaceProperties, AlterViewSchemaBinding, AlterTableCollation, SetNamespaceCollation, AlterClusterBy and AddTableConstraint -- are the same category, which is why they sit here instead of in a rule of their own. Note 3.5.1's SetTableCollation is not a 4.2 label: collation moved to `ALTER TABLE ... SET COLLATION` (AlterTableCollation) and the namespace spelling (SetNamespaceCollation)."
+    },
+    {
+      "id": "review.session-state",
+      "verdict": "review",
+      "reason": "unsupported_statement",
+      "message": "changes session or runtime state (SET / RESET / CACHE / variables / cursors / TIME ZONE); needs review",
+      "severity": "medium",
+      "labels": [
+        "SetConfiguration", "SetQuotedConfiguration", "ResetConfiguration",
+        "ResetQuotedConfiguration", "SetTimeZone", "SetPath",
+        "SetVariable", "SetVariableInsideSqlScript", "CreateVariable", "DropVariable",
+        "DeclareCursorStatement", "OpenCursorStatement", "FetchCursorStatement",
+        "CloseCursorStatement", "CacheTable", "UncacheTable", "ClearCache"
+      ],
+      "description": "Effect CHANGE_CONFIG. One SET changes how every later statement in the session behaves -- warehouse dir, extraJavaOptions, S3 credentials, shuffle partitions -- so it cannot be judged one line at a time. The 4.x additions are the same category: SET PATH repoints session state, SET var = ... / DECLARE var (SetVariable, SetVariableInsideSqlScript, CreateVariable, DropVariable) is state later statements read, and the cursor lifecycle (DECLARE/OPEN/FETCH/CLOSE CURSOR) holds a query open across statements. Note you cannot narrow this with `literal_prefixes` either: the 4.2 grammar matches `SET configKey` with a wildcard, so the key is not extracted as a string literal and a prefix list would never match."
+    },
+    {
+      "id": "review.call",
+      "verdict": "review",
+      "reason": "unsupported_statement",
+      "message": "CALL may invoke a procedure with side effects; needs review",
+      "severity": "medium",
+      "labels": ["Call"],
+      "description": "Effect REACHES_EXTERNAL. `CALL` does not exist in the 3.5.1 grammar; in 4.x it is a catalog procedure invocation, and what the procedure does is not visible to the parser."
+    },
+    {
+      "id": "review.dynamic-sql",
+      "verdict": "review",
+      "reason": "unsupported_statement",
+      "message": "EXECUTE IMMEDIATE runs SQL held in an expression; needs review",
+      "severity": "high",
+      "labels": ["VisitExecuteImmediate"],
+      "description": "Effect REACHES_EXTERNAL, which is a stand-in for 'runs SQL we have not seen yet'. When the payload is a string literal it is extracted and analysed separately (screen._check_execute_immediate), so `EXECUTE IMMEDIATE 'DROP TABLE t'` reports DENY via the nested statement while this rule's own REVIEW covers the payload the screener cannot fold -- a variable, a function call. Denying the wrapper outright would deny the fully-analysed constant case for no added safety; if you want that stricter posture anyway, change this rule's verdict to deny."
+    },
+    {
+      "id": "allow.query",
+      "verdict": "allow",
+      "reason": "no_matching_rule",
+      "message": "read-only query",
+      "severity": "info",
+      "labels": ["StatementDefault"],
+      "description": "The only label allowed outright. USE, USE NAMESPACE, SET CATALOG, SHOW TABLES, SHOW NAMESPACES, SHOW CATALOGS, SHOW CURRENT NAMESPACE, DESCRIBE*, EXPLAIN, ANALYZE, REFRESH*, COMMENT*, CREATE NAMESPACE and CREATE VIEW are all in the read-only label set (READ_ONLY_LABELS in policy.py) and fall through to ALLOW without needing a rule of their own. Three SHOWs deliberately are not -- SHOW TABLE EXTENDED, SHOW TBLPROPERTIES and SHOW COLLATIONS -- they take the generic review path (reason unsupported_statement), which is the fail-closed answer for statements the policy has not been taught. The wrapper labels (DmlStatement, SingleInsertQuery, MultiInsertQuery) are deliberately absent: the tree walk descends through them to the resolved statement, so a rule keyed on a wrapper would never fire."
+    }
+  ],
+
+  "limits": {
+    "max_code_chars": 20000,
+    "max_sql_chars": 10000,
+    "max_statements": 200,
+    "max_literals": 100,
+    "max_targets": 100
+  }
+}
