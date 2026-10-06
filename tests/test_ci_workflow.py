@@ -70,6 +70,10 @@ except ImportError as _exc:  # pragma: no cover - depends on the environment
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+#: Every workflow's run: blocks get the same bash -n treatment. F25's lesson applies
+#: per file: shell embedded in ANY YAML file is seen by nothing else in this repo, so
+#: a new workflow (e.g. fuzz-deep.yml) must not have to opt in to being checked.
+WORKFLOWS = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
 
 
 def _run_blocks(text: str) -> list[tuple[str, str]]:
@@ -115,7 +119,11 @@ def _as_shell(block: str) -> str:
     return "".join(out)
 
 
-BLOCKS = _run_blocks(WORKFLOW.read_text()) if WORKFLOW.exists() else []
+BLOCKS = [
+    (f"{wf.name}:{trail}", block)
+    for wf in WORKFLOWS
+    for trail, block in _run_blocks(wf.read_text())
+] if WORKFLOWS else []
 
 
 def test_the_workflow_has_run_blocks_to_check():
@@ -126,6 +134,10 @@ def test_the_workflow_has_run_blocks_to_check():
     pass having examined zero steps.
     """
     assert WORKFLOW.exists(), f"{WORKFLOW} is missing; the parse guard cannot run"
+    assert len(WORKFLOWS) >= 2, (
+        f"expected more than one workflow under .github/workflows/, found "
+        f"{[wf.name for wf in WORKFLOWS]}; a new workflow must not be unchecked"
+    )
     assert len(BLOCKS) >= 5, f"expected the CI steps, found only {len(BLOCKS)}: {BLOCKS}"
     # The two jobs that were broken, so a rename cannot quietly drop them from the count.
     joined = "\n".join(block for _, block in BLOCKS)
@@ -176,10 +188,16 @@ def test_this_module_will_not_skip_itself_unchecked():
 
 
 def test_the_workflow_parses_as_yaml():
-    """Separate from the shell check, and earlier: a YAML error reads far worse."""
+    """Separate from the shell check, and earlier: a YAML error reads far worse.
+
+    Every workflow file, not just ci.yml: a new workflow that fails to parse would
+    otherwise be discovered by Actions, not by this suite.
+    """
+    for wf in WORKFLOWS:
+        data = yaml.safe_load(wf.read_text())
+        assert isinstance(data, dict), f"{wf.name}: the workflow is not a YAML mapping"
+        assert "jobs" in data, f"{wf.name}: the workflow declares no jobs"
     data = yaml.safe_load(WORKFLOW.read_text())
-    assert isinstance(data, dict), "the workflow is not a YAML mapping"
-    assert "jobs" in data, "the workflow declares no jobs"
     for job in ("fast", "wheel", "differential", "docs", "grammar-build"):
         assert job in data["jobs"], f"the {job} job is missing from the workflow"
 
@@ -196,11 +214,12 @@ def test_python_is_the_interpreter_ci_uses():
     the runtime check is the CI-shaped tree, which cannot be built from inside a runner
     that does have a `.venv`.
     """
-    text = WORKFLOW.read_text()
-    assert ".venv/bin/python" not in text, (
-        "the workflow names .venv/bin/python, but no CI job creates a .venv; CI installs "
-        ".[dev] into the job's own interpreter"
-    )
+    text_by_file = {wf.name: wf.read_text() for wf in WORKFLOWS}
+    for name, text in text_by_file.items():
+        assert ".venv/bin/python" not in text, (
+            f"{name}: the workflow names .venv/bin/python, but no CI job creates a "
+            ".venv; CI installs \".[dev]\" into the job's own interpreter"
+        )
     # And the shape that would reintroduce it: a run step invoking an audit directly
     # rather than through ci_checks.py, which does the interpreter lookup itself.
     for trail, block in BLOCKS:

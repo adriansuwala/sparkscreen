@@ -186,6 +186,8 @@ The checks map onto CI jobs:
 |---|---|---|
 | `no-pyspark` | fast | nothing |
 | `fast` | fast | nothing |
+| `fuzz-fast-deep` | fuzz-deep (scheduled) | nothing |
+| `fuzz-deep` | fuzz-deep (scheduled) | a JVM and a pinned pyspark |
 | `wheel-contents` | wheel | `build` |
 | `wheel-install` | wheel | `build` |
 | `differential` | differential | a JVM and a pinned pyspark |
@@ -193,9 +195,14 @@ The checks map onto CI jobs:
 | `grammar-clean` | grammar-build | a JVM |
 | (pytest, in `fast`) | fast | nothing |
 
+The two `fuzz-*` checks run the same code paths as the per-push checks at scheduled-job
+depth (1000 Hypothesis examples per property; 2000 sweep mutants with a fresh seed per
+run). They are excluded from `--all` on purpose: depth is a scheduled-job concern, not a
+per-PR one. `.github/workflows/fuzz-deep.yml` calls them daily and on demand.
+
 `tests/test_ci_workflow.py` is the one guard with no `ci_checks.py` entry, because it is
-part of the fast suite rather than a separate gate. It parses every `run:` block in
-`.github/workflows/ci.yml` and hands each to `bash -n`: shell embedded in YAML is seen by
+part of the fast suite rather than a separate gate. It parses every `run:` block in every
+`.github/workflows/*.yml` file and hands each to `bash -n`: shell embedded in YAML is seen by
 nothing else in this repo, including the guards written to protect it (F25).
 
 `grammar-clean` regenerates the parsers from the pinned grammars and fails on any diff. It
