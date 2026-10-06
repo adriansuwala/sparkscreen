@@ -289,3 +289,68 @@ real agent output that operators stopped reading UNKNOWN — at which point the 
 real sandbox might be worth paying. We have not measured that, and measuring it means
 collecting a corpus of real snippets. That corpus does not exist yet and is probably the
 highest-value next artifact of any kind.
+
+## T8 — EXPLAIN-plan parsing as a second oracle (refinement of T2)
+
+**Status: musing, probed against live engines 2026-10-06.** Raised while considering T2:
+instead of intercepting Spark Connect's typed logical plan on the wire, run `EXPLAIN <stmt>`
+and parse the plan text. Probed on all three pinned engines (pyspark 3.5.1, 4.1.3, 4.2.0,
+local mode). No implementation exists; this section records what was measured.
+
+**What EXPLAIN buys, verified.**
+
+1. **It executes nothing.** Ran `EXPLAIN` before `drop table`, `insert overwrite/into`,
+   `merge`, `truncate`, `alter table rename`, `cache/uncache`, `set`, `add jar`,
+   `create function`, `reset`, and CTAS: catalog state, row counts, cache state and the
+   function list were unchanged afterwards on all three engines. This is the property that
+   makes it a *screener* input rather than an execution. Also verified: `EXPLAIN
+   DROP TABLE SCRATCH_T` in uppercase left the table in place — a differential-style test
+   can assert non-execution directly, not just absence of an error.
+2. **The plan text carries the facts a policy needs.** `DropTable ... default.scratch_t,
+   false, false, ...` — target, and both boolean flags (`IF EXISTS`, `IF EXISTS`-view).
+   `Execute InsertIntoHadoopFsRelationCommand <path>, false, Parquet, [path=...], Overwrite,
+   \`spark_catalog\`.\`default\`.\`scratch_t\`, ..., [id]` — target, write mode, and columns.
+   Also legible: `TruncateTable`, `AlterTableRenameCommand`, `CacheTable`,
+   `SetCommand`, `AddJarsCommand`, `CreateFunctionCommand`, `ResetCommand`, `RefreshTable`.
+   The plan resolves what the static folder cannot: the schema-qualified, engine-canonical
+   target of the statement that would actually run.
+3. **It covers DataFrame writes.** `df.write.mode("overwrite").save("s3://bucket/x")`
+   EXPLAINs to the same `Execute InsertIntoHadoopFsRelationCommand ... Save` text — the
+   DataFrame blind spot T2 targets, without Spark Connect.
+4. **It reveals the engine's post-analysis state, not the text's.** `EXPLAIN select * from
+   no_such_table_zz` embeds `AnalysisException: [TABLE_OR_VIEW_NOT_FOUND]` in the plan on
+   3.5.1 — you learn whether a statement is even analysable without running it.
+
+**What it costs, also verified.**
+
+- **4.1.3 and 4.2.0 return an empty error on planning failure.** `EXPLAIN merge into ...`
+  (V1 parquet catalog) gives `Error occurred during query planning: ` with *no message* on
+  4.x, while 3.5.1 embeds the full AnalysisException. Parseability of the wrapper is
+  engine-specific, so a parser cannot lean on the error text. (Merging into a V1 table
+  fails for real too, so this is an accuracy note, not a safety hole.)
+- **Identifier casing is not canonicalised uniformly.** `EXPLAIN DROP TABLE SCRATCH_T`
+  reports `default.SCRATCH_T` verbatim, while INSERT nodes show the quoted canonical
+  `` `spark_catalog`.`default`.`scratch_t` ``. Case-insensitivity (F6) must be normalised
+  by the plan parser, not inherited from the engine.
+- **Plan text is not a contract.** Node names and shapes (`DropTable` args, the
+  `DataSourceV2Strategy$$Lambda$...` suffix, `InsertIntoHadoopFsRelationCommand` fields)
+  are `ExplainUtils`/TreeNode rendering, not a stable interface; they already differ
+  between 3.5.1 and 4.x in the wrapper only, but upstream treats them as free to change.
+  Any matcher on plan text needs per-engine pinning, exactly like the grammars, and a
+  differential test that fails loudly when a plan shape moves.
+- **It answers a different question than static screening.** EXPLAIN needs a running
+  engine, so it is unavailable offline / pre-commit, and it screens what *would* run here,
+  not the file being reviewed.
+
+**Where it sits relative to T2/T5.** T2's real content is a second, more accurate oracle
+next to the static path, with the DataFrame gap as the headline. EXPLAIN is the cheapest
+concrete form of that oracle: no proxy, no Connect dependency, works in local mode, and
+its natural home is the differential suite (same shape as the live-Spark harness that
+caught F6) plus an optional runtime gate alongside a future Connect shim. The wire-level
+plan from T2 would still supersede it on fidelity — typed nodes instead of rendered text —
+so T8 is the version to build when the question is "is the plan-based oracle worth
+building at all", and the answer feeds T5's "both" leaning.
+
+**Would change our mind** if plan-text shapes prove unstable across engine *patch*
+releases — then only the wire-level (T2) form survives, and EXPLAIN downgrades to a test
+fixture.
