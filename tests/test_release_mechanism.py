@@ -115,8 +115,16 @@ INIT_TEMPLATE = '''__version__ = "{version}"
 '''
 
 
-def _make_repo(tmp_path: Path, version: str = "0.8.0") -> Path:
-    """A throwaway repo with the shape the script needs, plus a bare origin."""
+def _make_repo(tmp_path: Path, version: str = "0.8.0",
+               configure_identity: bool = True) -> Path:
+    """A throwaway repo with the shape the script needs, plus a bare origin.
+
+    `configure_identity=False` builds a repo with NO git identity -- the state a
+    fresh CI runner is in. That variant is the regression test for the release
+    workflow's first real failure: the commit carried a `-c` identity but the
+    annotated tag did not, so `git tag -a` died with "empty ident name" after the
+    bump had already been committed.
+    """
     repo = tmp_path / "repo"
     (repo / "src/sparkscreen").mkdir(parents=True)
     (repo / "pyproject.toml").write_text(PYPROJECT_TEMPLATE.format(version=version))
@@ -124,11 +132,17 @@ def _make_repo(tmp_path: Path, version: str = "0.8.0") -> Path:
     (repo / "scripts").mkdir()
     git = ["git", "-C", str(repo)]
     subprocess.run(git + ["init", "-b", "master"], check=True, capture_output=True)
-    subprocess.run(git + ["config", "user.name", "Test"], check=True, capture_output=True)
-    subprocess.run(git + ["config", "user.email", "test@example.com"],
-                   check=True, capture_output=True)
+    if configure_identity:
+        subprocess.run(git + ["config", "user.name", "Test"], check=True,
+                       capture_output=True)
+        subprocess.run(git + ["config", "user.email", "test@example.com"],
+                       check=True, capture_output=True)
     subprocess.run(git + ["add", "-A"], check=True, capture_output=True)
-    subprocess.run(git + ["commit", "-m", "work"], check=True, capture_output=True)
+    # The setup commit carries its own -c identity; the repo itself stays
+    # identity-less when configure_identity=False, which is the point of the flag.
+    subprocess.run(git + ["-c", "user.name=Setup", "-c",
+                          "user.email=setup@example.com",
+                          "commit", "-m", "work"], check=True, capture_output=True)
     # A bare origin, so `fetch --tags origin` succeeds and --no-push can be
     # verified against a real remote rather than assumed.
     origin = tmp_path / "origin.git"
@@ -216,6 +230,27 @@ def test_release_refuses_an_existing_tag(tmp_path):
     assert proc.returncode == 1
     assert "already exists" in proc.stderr
     assert _version_of(repo) == "0.8.0"
+
+
+def test_release_works_on_a_runner_with_no_git_identity(tmp_path):
+    """Regression: the release workflow's first real failure.
+
+    A fresh CI runner has no user.name/user.email configured. The release commit
+    carried a `-c` identity but the annotated tag did not, so `git tag -a` died
+    with "empty ident name" AFTER the bump had been committed -- on the first
+    real run of the workflow, from a bug no configured-identity test could see.
+    """
+    repo = _make_repo(tmp_path, configure_identity=False)
+    proc = _run_release(repo, "--bump", "minor", "--skip-gate", "--yes", "--no-push")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    tagger = subprocess.run(
+        ["git", "-C", str(repo), "for-each-ref", "refs/tags/v0.9.0",
+         "--format=%(taggername)"], capture_output=True, text=True).stdout.strip()
+    assert tagger, "the tag has no tagger identity at all"
+    committer = subprocess.run(
+        ["git", "-C", str(repo), "log", "-1", "--format=%cn"],
+        capture_output=True, text=True).stdout.strip()
+    assert committer, "the release commit has no committer identity"
 
 
 def test_release_refuses_a_bumped_to_same_version(tmp_path):

@@ -326,9 +326,14 @@ def main(argv: list[str] | None = None) -> int:
         _git(root, "add", *(str(p.relative_to(root)) for p in touched))
 
         name, email = _identity(root)
-        _git(root, "-c", f"user.name={name}", "-c", f"user.email={email}",
-             "commit", "-m", f"Release {new}")
-        _git(root, "tag", "-a", f"v{new}", "-m", f"sparkscreen {new}\n\n{section}")
+        # The identity rides on BOTH ref-creating commands. git commit needs an
+        # author/committer and git tag needs a tagger; CI configures neither, and
+        # passing it to one but not the other fails the tag with "empty ident
+        # name" after the commit has already been made.
+        identity_args = ("-c", f"user.name={name}", "-c", f"user.email={email}")
+        _git(root, *identity_args, "commit", "-m", f"Release {new}")
+        _git(root, *identity_args, "tag", "-a", f"v{new}",
+             "-m", f"sparkscreen {new}\n\n{section}")
 
         # ---- post-write verification: the tag must name HEAD ----
         described = _git(root, "describe", "--exact-match", "--tags", "HEAD")
