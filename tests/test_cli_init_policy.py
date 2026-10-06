@@ -102,11 +102,10 @@ def test_helper_raises_for_a_grammar_with_no_shipped_file():
         _default_policy_text("spark-9.9")
 
 
-def test_rejects_a_path_argument():
+def test_rejects_a_path_argument(tmp_path):
     """`--init-policy code.py` must error, not screen code.py with the flag
     silently ignored."""
-    code = tmp_path = Path("/opt/data/cache/scratch")
-    target = code / "init_policy_arg_probe.py"
+    target = tmp_path / "init_policy_arg_probe.py"
     target.write_text("spark.sql('DROP TABLE t')\n")
     r = _cli("--init-policy", "--spark", "3.5.1", str(target))
     assert r.returncode == 2
