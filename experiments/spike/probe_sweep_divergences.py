@@ -9,7 +9,9 @@ case by case from pytest failures.
     JAVA_HOME=... <engine-venv>/bin/python experiments/spike/probe_sweep_divergences.py
 """
 import importlib.util
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -36,7 +38,9 @@ session = (
     SparkSession.builder.master("local[1]")
     .appName("sparkscreen-sweep-divergence-probe")
     .config("spark.ui.enabled", "false")
-    .config("spark.sql.warehouse.dir", f"/opt/data/cache/scratch/ps-fuzz-wh-{key}")
+    .config("spark.sql.warehouse.dir",
+            os.environ.get("SPARKSCREEN_FUZZ_WAREHOUSE_DIR")
+            or tempfile.mkdtemp(prefix=f"sparkscreen-fuzz-wh-{key}-"))
     .getOrCreate()
 )
 session.sparkContext.setLogLevel("ERROR")

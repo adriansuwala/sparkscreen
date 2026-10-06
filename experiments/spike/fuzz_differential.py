@@ -104,10 +104,14 @@ def build_cases(n_mutants, n_seeds):
 
 
 def main():
+    import tempfile
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--key", required=True, choices=["spark-3.5.1", "spark-4.1", "spark-4.2"])
     ap.add_argument("--mutants", type=int, default=500)
     ap.add_argument("--seeds", type=int, default=40)
+    ap.add_argument("--warehouse-dir", default=None,
+                    help="Spark warehouse dir; default: a fresh temp dir")
     args = ap.parse_args()
 
     cases = build_cases(args.mutants, args.seeds)
@@ -116,7 +120,7 @@ def main():
 
     from pyspark.sql import SparkSession
 
-    wh = f"/opt/data/cache/scratch/ps-fuzz-wh-{args.key}"
+    wh = args.warehouse_dir or tempfile.mkdtemp(prefix=f"sparkscreen-fuzz-wh-{args.key}-")
     session = (
         SparkSession.builder.master("local[1]")
         .appName("sparkscreen-fuzz-diff")

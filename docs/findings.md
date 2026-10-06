@@ -1062,17 +1062,36 @@ on all three engines, computed by `experiments/spike/probe_sweep_divergences.py`
 of `CORPUS` on purpose, since a `CORPUS` row asserts our parser already agrees, which it
 does not. The parse-acceptance xfail in `tests/test_properties.py` pins the current
 behaviour JVM-free, parametrized over the same table, and the sweep test treats a
-we-accept/engine-reject outside it as a hard failure, so the class cannot grow unnoticed.
-A new mutant shape in this class needs a new row in that table and a line in this
-finding, not a red suite by accident.
+we-accept/engine-reject outside the tolerated classes (or carrying
+PARSE_SYNTAX_ERROR) as a hard failure, so neither the class nor its families can grow
+unnoticed. New evidence rows still belong in the table, annotated with the observed
+class -- not a red suite by accident.
+
+**The class is wider than the first five rows.** The scheduled-depth sweep (2000 fresh
+mutants, `experiments/spike/probe_deep_divergence_classes.py`) found ~34 more members
+across the same mechanism: mangled `DROP INDEX` qualifiers, glued `ADD JAR` resource
+types (`add jarjar ...`), and mangled `REPLACE COLUMNS` bodies, plus more spellings of
+the SET and datatype families. The engine messages settled every one as command-layer
+(`INVALID_STATEMENT_OR_CLAUSE`, unbracketed `Operation not allowed: ...`, the two known
+classes) -- and, decisively, that genuine grammar-level rejections arrive bracketed as
+`[PARSE_SYNTAX_ERROR]` on both 3.5.1 and 4.2.0. That is what makes the tolerance rule
+closed: the sweep tolerates by error CLASS (the recorded command-layer families, plus
+the unbracketed legacy shape, printed and counted rather than silently absorbed) and
+fails on `PARSE_SYNTAX_ERROR` -- which would be a real port defect -- and on any
+unrecognised class, which would be a family nobody classified yet. Exact-string
+recording was the first draft of this rule; the class taxonomy is what scales.
 
 **The decision this is waiting on.** `parse()`'s contract today is "the grammar accepts".
 The differential suite's asymmetry demands "the engine's parser accepts". Closing the gap
-means modelling AST-layer validation for the shapes the engines reject — a SET-shape
-check and a type-name check — and both need live-engine verification of the full rule
+means modelling AST-layer validation for the shapes the engines reject -- a SET-shape
+check and a type-name check -- and both need live-engine verification of the full rule
 they implement (the set shapes per engine version, the supported type universe), or the
 fix will be stricter than some engine and the harness will flag it as drift in the other
-direction. Until that decision, the gap is tracked rather than owned.
+direction. The widening of the class (dozens of members, four families) makes "model the
+validations statement by statement" the expensive option; the alternative -- document the
+divergence as a known, bounded, screener-health property and keep the classifier as its
+guard -- is now the cheaper honest answer. Until that decision, the gap is tracked rather
+than owned.
 
 **Where the fuzz layer stands after this sweep.** The pre-existing property tests
 replayed fixed seed pools; section 5 of `tests/test_properties.py` mutates the seeds so

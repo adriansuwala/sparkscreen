@@ -5,6 +5,7 @@ rejected: a PARSE_SYNTAX_ERROR at the grammar is different from a rejection rais
 the AST builder, which is different again from config-gated syntax. Record the message.
 """
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -21,7 +22,7 @@ session = (
     SparkSession.builder.master("local[1]")
     .appName("sparkscreen-fuzz-probe")
     .config("spark.ui.enabled", "false")
-    .config("spark.sql.warehouse.dir", "/opt/data/cache/scratch/ps-fuzz-wh-probe")
+    .config("spark.sql.warehouse.dir", tempfile.mkdtemp(prefix="sparkscreen-fuzz-wh-probe-"))
     .getOrCreate()
 )
 session.sparkContext.setLogLevel("ERROR")

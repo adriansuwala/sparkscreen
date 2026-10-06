@@ -341,3 +341,33 @@ belongs in the `verdict` field, which every consumer already parses.
   silently dropping `OUTSIDE_ALLOWLIST` from the report. It now prefers by attention
   needed rather than by one specific verdict, which makes that class of regression
   structural rather than incidental.
+## D19 — the deep fuzz runs on a schedule, not per push; seeds are guarded, not curated
+
+The per-push suite fuzzes at per-PR depth (40 Hypothesis examples per property, 250
+sweep mutants with a fixed seed). A `fuzz-deep` workflow (daily + manual) runs the same
+code paths — `ci_checks.py fuzz-fast-deep` and `fuzz-deep` — at 1000 examples and 2000
+mutants with a fresh seed every run, so the exploration surface grows with wall-clock
+time instead of being capped by the push budget.
+
+Two guards make the growth safe rather than voluminous:
+
+1. **Fresh seed per scheduled run.** A fixed seed replays; only a fresh seed explores.
+   Every failure names its seed and mutant budget in the assertion, so a red scheduled
+   run is reproducible on demand. A new divergence is classified by the engine's error
+   class: PARSE_SYNTAX_ERROR means a port defect (fix it); an unrecognised class means
+   a family nobody has named yet (add it deliberately to TOLERATED_REJECTION_CLASSES);
+   a member of a known F27 family is tolerated and printed.
+2. **Seed completeness.** `test_seed_pool_reaches_every_destructive_label` asserts every
+   label the effect table marks DESTROY_DATA or LOAD_CODE appears in some seed's parse
+   tree. A new destructive statement kind without a seed fails the fast suite, so the
+   fuzzed surface grows with the policy rather than with whoever remembered to add a
+   seed.
+
+**Why we might be wrong.** A scheduled fuzzer finds bugs nobody is looking at, so a red
+fuzz-deep job on an otherwise-green day has to compete with "flaky" reflexes; the
+mitigation is that every failing mutant is a specific, reproducible SQL string, not a
+timing artifact — there is no flake channel in this design. And the seed guard enforces
+reachability, not depth: a label with one seed gets mutated, but one seed may still
+under-explore that label's syntax family. The differential sweep at 250 mutants found
+every member of the F27 family the 540-case sweep did, which is the evidence that this
+is, for now, enough.

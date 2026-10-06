@@ -34,35 +34,49 @@ convention in tests/test_folding.py. Nothing under src/ is modified here.
 """
 from __future__ import annotations
 
+import os
 import random
 import re
 import string
 
 import pytest
+from antlr4 import ParserRuleContext
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
 from sparkscreen.grammar.parser import SqlParser, SqlSyntaxError, get_parser
 from sparkscreen.grammar.port import PortError, port_grammar
 from sparkscreen.grammar.spec import SPECS, GrammarSpec
-from sparkscreen.analysis.effects import effects_for_label
+from sparkscreen.analysis.effects import effects_for_label, LABEL_EFFECTS
 from sparkscreen.model import UNKNOWN_REASONS, Effect, Verdict
 from sparkscreen.screen import screen
 
-from differential.corpus import KNOWN_AST_LAYER_REJECTIONS
+from differential.corpus import FUZZ_SEEDS, KNOWN_AST_LAYER_REJECTIONS
 
 pytestmark = pytest.mark.fuzz
 
 # Parsing is CPU-bound and the ANTLR runtime is not fast, so the default Hypothesis
 # deadline (200ms) would flake on a loaded machine. Correctness here is about which
 # exception type escapes, not how fast it arrives.
+#
+# Two profiles. The per-push suite runs "sparkscreen" (40 examples: the fast suite has
+# a ~35s budget shared with ~3,800 other tests). `ci_checks.py fuzz-fast-deep` -- the
+# scheduled deep-fuzz job -- sets HYPOTHESIS_PROFILE=sparkscreen-deep and gets the
+# same properties at 1000 examples, so depth is a scheduled-job concern, not a
+# per-push-budget one.
 settings.register_profile(
     "sparkscreen",
     deadline=None,
     max_examples=40,
     suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large],
 )
-settings.load_profile("sparkscreen")
+settings.register_profile(
+    "sparkscreen-deep",
+    deadline=None,
+    max_examples=1000,
+    suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large],
+)
+settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "sparkscreen"))
 
 KEYS = [s.key for s in SPECS]
 
@@ -762,6 +776,61 @@ def _screen_one(key: str, sql: str):
     """Screen `spark.sql(<sql>)` under one grammar. repr() embeds the SQL, so
     mutants containing quotes or backticks cannot corrupt the generated source."""
     return screen(f"import pyspark\nspark.sql({sql!r})\n", spec=key)
+
+
+def _tree_labels(tree) -> set[str]:
+    """Every context label in a parse tree: the ANTLR class name minus its Context
+    suffix, collected recursively. Over-collects -- non-labeled rule contexts appear
+    too -- but the guard only checks membership in the effect table, so that is
+    harmless; the over-approximation is the safe direction for coverage."""
+    labels = {type(tree).__name__.removesuffix("Context")}
+    for child in tree.getChildren():
+        if isinstance(child, ParserRuleContext):
+            labels |= _tree_labels(child)
+    return labels
+
+
+def test_seed_pool_reaches_every_destructive_label():
+    """PROPERTY: every label the effect table marks DESTROY_DATA or LOAD_CODE appears
+    in some seed's parse tree, on at least one pinned grammar.
+
+    The mutation sweeps only mutate seed *text*: a destructive statement kind with no
+    seed is never mutated, so a policy regression on that kind would be invisible to
+    both fuzz layers at once. Tree-level, not top-level, is the honest requirement --
+    the FROM-led multi-insert reaches `MultiInsertQuery` only as a descendant context
+    (its top-level label is `DmlStatement` > `FromClause`, the F26 shape).
+
+    This is the guard that keeps the fuzzed surface growing with the effect table
+    instead of with whoever remembered to add a seed. The fix for a failure is a seed,
+    added deliberately to FUZZ_SEEDS in tests/differential/corpus.py, plus a sweep
+    re-run (experiments/spike/probe_sweep_divergences.py) if the new seed changes the
+    recorded divergence set.
+
+    Related limitation, deliberate: the JVM-free verdict fuzz (section 5, `_mutated_sql`)
+    still mutates the module-local SEED_SQL pool, not FUZZ_SEEDS, because FUZZ_SEEDS
+    now contains the FROM-led multi-insert whose screening crashes on F26
+    (`UnmappedLabelError`). When F26 closes, section 5 should switch to FUZZ_SEEDS and
+    the two layers then truly fuzz one surface.
+    """
+    reachable: set[str] = set()
+    for key in KEYS:
+        parser = _parser(key)
+        for sql in FUZZ_SEEDS:
+            statement = parser.try_parse(sql)
+            if statement is None:
+                continue
+            reachable |= _tree_labels(statement.tree)
+    destructive = {
+        label for label, effects in LABEL_EFFECTS.items()
+        if effects & _MUST_NOT_ALLOW
+    }
+    missing = sorted(destructive - reachable)
+    assert not missing, (
+        f"destructive labels with no seed in FUZZ_SEEDS "
+        f"(tests/differential/corpus.py): {missing}. Add one seed per label -- "
+        "the sweeps mutate seeds, so an unreachable label is an unfuzzed statement "
+        "kind."
+    )
 
 
 @given(key=st.sampled_from(KEYS), sql=_mutated_sql())
