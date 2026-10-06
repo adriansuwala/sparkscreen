@@ -44,7 +44,7 @@ try:  # installed: the packaging metadata is authoritative
 
     __version__ = _pkg_version("sparkscreen")
 except Exception:  # pragma: no cover - source checkout without an install
-    __version__ = "0.8.0"
+    __version__ = "0.9.0"
 
 #: Why this is not 1.0, stated once so it is not re-litigated.
 #:
