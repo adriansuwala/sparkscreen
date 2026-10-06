@@ -341,6 +341,9 @@ belongs in the `verdict` field, which every consumer already parses.
   silently dropping `OUTSIDE_ALLOWLIST` from the report. It now prefers by attention
   needed rather than by one specific verdict, which makes that class of regression
   structural rather than incidental.
+
+---
+
 ## D19 — the deep fuzz runs on a schedule, not per push; seeds are guarded, not curated
 
 The per-push suite fuzzes at per-PR depth (40 Hypothesis examples per property, 250
@@ -371,3 +374,44 @@ reachability, not depth: a label with one seed gets mutated, but one seed may st
 under-explore that label's syntax family. The differential sweep at 250 mutants found
 every member of the F27 family the 540-case sweep did, which is the evidence that this
 is, for now, enough.
+
+---
+
+## D20 — releases are a tagged master and a GitHub Release; the version is written by one script
+
+**Decision.** No registry upload (2026-10-04, roadmap.md). A release is: the full CI matrix green on
+the exact commit, one commit that bumps the version and writes the changelog, an annotated
+`vX.Y.Z` tag on that commit, and a GitHub Release carrying the built wheel. The bump is
+made by `scripts/release.py`, triggered manually through `.github/workflows/release.yml`
+(`workflow_dispatch`, bump level chosen by hand — commit messages are not parsed).
+
+**Why the script, not more automation.** The version has exactly two homes — `version` in
+pyproject.toml and the source-checkout fallback in `__init__.py` — and they drifted apart
+once already (tests/test_packaging.py exists because of it). Deriving bump levels from
+commit messages would impose a convention on every future PR to save one argument; the
+release is rare and the bump is a decision about user impact, which is exactly the kind of
+decision a human makes, not a log parser.
+
+**Why the workflow re-runs the full matrix.** A release is rare and the matrix is minutes;
+the tag must never point at a commit nobody verified. The gate is ci.yml invoked as a
+reusable workflow (`workflow_call`), so the checks a release must pass are one definition,
+not a copy that drifts.
+
+**Invariants the implementation enforces, mechanically:**
+
+- Every refusal fires before the first write: wrong branch, dirty tree, existing tag,
+  unreachable remote, failed gate.
+- The script is the only thing that writes the version. It rewrites both homes from one
+  pattern pair and verifies the tag names HEAD afterwards (`describe --exact-match`).
+- README carries no package-version literal — `_verify_readme.py` fails if the current
+  version appears there. The number lives in pyproject.toml, CHANGELOG.md and the Releases
+  page; a README copy was one more site to bump and the audit was the only thing catching
+  the drift.
+- The release job builds the wheel from the release commit itself and attaches it to the
+  GitHub Release, so the install link points at the exact verified artefact.
+
+**Why we might be wrong.** Commit-derived versioning (conventional commits + a bot) is the
+industry default and removes the human step entirely; if releases ever become frequent
+enough that hand-picking a bump level is friction, revisit there. And the GitHub-Release
+attachment is a single asset naming scheme — if a second artefact (sdist?) ever ships, the
+workflow, not the script, is where that grows.

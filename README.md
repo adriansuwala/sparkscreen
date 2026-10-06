@@ -16,9 +16,14 @@ df.write.mode("overwrite").saveAsTable("prod.events_v2")
 ```
 
 ```bash
-pip install sparkscreen     # 462 KB, no JVM, Python >= 3.10
-sparkscreen job.py          # exit 0 / 1 / 2
+# Install from a release tag (see the GitHub Releases page for the latest tag):
+pip install "sparkscreen @ git+https://github.com/sparkscreen/sparkscreen@vX.Y.Z"
+sparkscreen job.py          # ~460 KB wheel, no JVM, exit 0 / 1 / 2
 ```
+
+No PyPI, by decision (docs/decisions.md): a release is a tag plus a GitHub Release
+carrying the built wheel, and the generated parsers ship in the wheel, so neither
+install path needs a JVM.
 
 ## What it catches
 
@@ -206,9 +211,12 @@ and none of them crashed.
 
 ## Status
 
-**0.8.0. Not 1.0 yet**, for two concrete reasons: `Verdict` gained a member recently (a
+**Not 1.0 yet**, for two concrete reasons: `Verdict` gained a member recently (a
 downstream exhaustive `match` would raise), and this has only ever been installed by its
-author. Exit codes `0`/`1`/`2` are stable.
+author. Exit codes `0`/`1`/`2` are stable. The current version lives in
+`pyproject.toml` — never copied here, so it cannot go stale in this file — and the
+release history is [CHANGELOG.md](CHANGELOG.md). The full stability contract is
+`sparkscreen.VERSION_NOTES`.
 
 Verified: ~2,500 tests, 51 differential expectations against a live Spark 3.5.1, mutation
 testing over the decision logic, and the built wheel installed into a clean environment

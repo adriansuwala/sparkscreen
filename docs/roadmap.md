@@ -194,27 +194,21 @@ is a real screener bug; a survivor in `screen.py` is the expensive kind, since t
 aggregation path which has already produced one production bug (F1).
 
 
-### Publishing — versioning and release scripts, no PyPI
+### Publishing — versioning and release scripts, no PyPI — done
 
 **Decided 2026-10-04: not publishing to PyPI.** Installation is via a GitHub link, which
 is what the wheel was already verified to support — it builds, installs into a clean venv
 and runs with `java` off `PATH`, carrying the generated parsers.
 
-What that makes necessary, and what it does not:
-
-- **Still needed** — a tagged release (`git tag` + a release entry) and whatever scripting
-  makes a release repeatable: version bump, changelog, tag, and the CI checks that must
-  pass first. "Installable from a GitHub link" still requires a tag to point at, and the
-  version is currently only `0.8.0` in `pyproject.toml`.
-- **No longer needed** — PyPI credentials, a `.pypirc`, trusted publishing, and the
-  name-availability question.
-
-The version is the single source of truth in `pyproject.toml`, read from there by
-`src/sparkscreen/__init__.py`. A release script should read it rather than parse it twice,
-so there is one number.
-
-The shortest path from "works on my machine" to "installable", and the only item here that
-is not blocked on a design question.
+**Shipped.** See [D20](decisions.md#d20--releases-are-a-tagged-master-and-a-github-release-the-version-is-written-by-one-script).
+A release is a manual Actions run (`.github/workflows/release.yml`): the full CI matrix
+runs as the gate, then `scripts/release.py` bumps the version (pyproject.toml and the
+`__init__.py` fallback, the only two homes), writes CHANGELOG.md from the commit log,
+commits, tags, pushes, builds the wheel from the release commit, and attaches it to the
+GitHub Release. The README carries no version literal any more — the audit fails if one
+appears — so a bump cannot leave a stale claim behind. The dead
+`gh-action-pypi-publish` step was removed from ci.yml; `tests/test_release_mechanism.py`
+guards the whole shape.
 
 ## Explicitly not doing
 
@@ -255,5 +249,6 @@ only in this file — which is the point of having a tracker. Closed: `rn6` (Dat
 writes), `120` (`DELETE`/`MERGE` destruction), `r50` (`LOAD DATA`), `znf` (Python
 scope), `dhe` (verdict split).
 
-Open, as of 2026-10-04: `kie` (versioning and release scripts, no PyPI) and `sxl` (the
-real-snippet corpus — deliberately non-synthetic). Run `br list` for current state.
+Open, as of 2026-10-04: `sxl` (the real-snippet corpus — deliberately non-synthetic).
+`kie` (versioning and release scripts) shipped in the release-mechanism work; run
+`br list` for current state.

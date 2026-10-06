@@ -1,0 +1,106 @@
+name: Release
+
+# A release is a human decision (which bump level), so it is a manual trigger --
+# never automatic, and never derived from commit messages (D19). It runs the full
+# CI matrix as its gate by calling ci.yml as a reusable workflow, so the checks a
+# release must pass are one definition, not a copy that can drift from CI.
+#
+# No registry upload, by decision: this workflow tags master, builds the wheel
+# from the release commit and attaches it to a GitHub Release. Installation stays
+# a GitHub link (README, docs/roadmap.md). tests/test_release_mechanism.py
+# carries a tripwire so no workflow quietly grows an upload step.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which version component to bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+        required: true
+
+# The release job pushes master, pushes the tag and creates the Release, so it
+# opts back in to write access; the called CI workflow is capped at read.
+permissions:
+  contents: write
+
+# Releases are sequential by nature and must never be cancelled mid-flight: a
+# half-done release (bumped tree pushed, tag missing) is the failure mode this
+# serialization exists to prevent. Concurrent dispatches queue.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    # The entire CI matrix, unchanged, as the gate. ci.yml's workflow_call trigger
+    # exists for exactly this: one definition of "the checks a release must pass".
+    # It is called with the dispatch ref (master), and needs no secrets.
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out master with tags and full history
+        # Full history and tags: scripts/release.py derives the changelog from
+        # `git log <last-tag>..HEAD` and refuses if the latest tag is not an
+        # ancestor of HEAD, both of which need the real history, not a shallow clone.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: master
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the build frontend
+        # For the wheel build below; release.py itself is stdlib-only.
+        run: python -m pip install build
+
+      - name: Bump, changelog, commit, tag (no push yet)
+        # --skip-gate is correct here, not a shortcut: the gate job above just ran
+        # the identical matrix on this exact commit, and re-running a subset would
+        # prove nothing extra. --no-push keeps every remote write in the steps
+        # below, so a failure before them leaves the remote untouched.
+        # The script falls back to the github-actions bot identity if the checkout
+        # has none, which is honest for a mechanical commit.
+        run: |
+          python scripts/release.py --bump "${{ inputs.bump }}" --skip-gate --yes --no-push
+
+      - name: Packaging invariants on the release commit
+        # The gate ran on the pre-bump commit; the bump commit itself is new. These
+        # tests assert exactly what a bump could break -- the two version homes
+        # agreeing, the wheel contents -- and nothing more.
+        run: |
+          python -m pip install -q -e ".[dev]"
+          python -m pytest tests/test_packaging.py -q
+
+      - name: Build the wheel from the release commit
+        run: python -m build --wheel --outdir dist
+
+      - name: Push master and the tag
+        # Only now are remote refs touched: a failure above leaves master and the
+        # tag exactly where they were. The tag points at the release commit, which
+        # the gate verified and whose wheel was just built from this tree.
+        run: |
+          git push origin master
+          git push origin "v$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+
+      - name: Create the GitHub Release with the wheel
+        # Release notes come from the changelog section the script just wrote
+        # (`--notes` prints exactly that section), so the Release page and
+        # CHANGELOG.md cannot disagree.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          python scripts/release.py --notes "v$VERSION" > notes.md
+          gh release create "v$VERSION" dist/*.whl \
+            --title "sparkscreen $VERSION" \
+            --notes-file notes.md
+          echo "release v$VERSION created"

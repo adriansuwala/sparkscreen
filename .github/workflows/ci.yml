@@ -1,6 +1,11 @@
 name: CI
 
 on:
+  # Callable as a reusable workflow: .github/workflows/release.yml invokes this
+  # entire matrix as the gate of a release, so the checks a release must pass are
+  # one definition of the checks, not a second copy (D19). It changes nothing about
+  # the push/PR triggers below; workflow_call only runs when explicitly called.
+  workflow_call: {}
   push:
     branches: [master, main]
   pull_request:
@@ -296,9 +301,20 @@ jobs:
           fi
 
   build-wheels:
-    # Wheel builds across every interpreter the wheel claims to support, plus the
-    # release publish. Kept last and independent of every other job: nothing here is
-    # consumed by the test jobs, so a packaging-tool failure cannot mask a test result.
+    # Wheel builds across every interpreter the wheel claims to support.
+    # Kept last and independent of every other job: nothing here is consumed by the
+    # test jobs, so a packaging-tool failure cannot mask a test result.
+    #
+    # There is deliberately no registry-upload step in this file. Decided
+    # 2026-10-04 (roadmap.md): no registry publishing -- installation is a GitHub
+    # link. An action that uploaded to the Python package index, gated on
+    # refs/tags/v*, used to sit here; it was dead code (tags do not trigger this
+    # workflow) and contradicted the decision, and a tag-triggered release would
+    # have failed on a missing token secret. Releases are made by
+    # .github/workflows/release.yml, which builds the wheel and attaches it to a
+    # GitHub Release. Guarded by tests/test_release_mechanism.py, whose tripwire
+    # fails if a registry upload is reintroduced here -- which is why this comment
+    # describes it without naming it (the same lesson as F26).
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -316,8 +332,7 @@ jobs:
         # `build` is a separate distribution from the project and from its own
         # build-system requirements. `python -m build --wheel` fails with
         # "No module named build" without it, and the failure is on every matrix
-        # leg -- which would take the publish step below down with it, since that
-        # step lives in this job.
+        # leg.
         run: |
           python -m pip install --upgrade pip
           python -m pip install build
@@ -327,12 +342,3 @@ jobs:
         # installed and not needed: `build` provisions the build backend from
         # [build-system].requires in an isolated env.
         run: python -m build --wheel --outdir dist
-
-      # Publishing is release-only and needs an identity token, not an API password.
-      # Pinned to a full commit SHA, not the moving release/v1 branch and not the
-      # v1.14.2 tag either: a tag can be moved by a maintainer after review, which
-      # is the same risk this pin exists to remove. Bump by hand and re-review.
-      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
-        if: startsWith(github.ref, 'refs/tags/v')
-        with:
-          password: ${{ secrets.PYPI_API_TOKEN }}

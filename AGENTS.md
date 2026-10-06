@@ -78,7 +78,8 @@ SQLite DB and will silently disagree with a hand-edited JSONL.
 
 ## Current state (2026-10-04)
 
-- 0.8.0 — pre-1.0; see `sparkscreen.VERSION_NOTES` for why
+- version lives in `pyproject.toml` (single source of truth) and is bumped by
+  `scripts/release.py` — pre-1.0; see `sparkscreen.VERSION_NOTES` for why
 - 3,830 tests passing without a JVM, 3,941 with one (the extra 27 are the pin-identity
   guard, which generates parsers and is skipped when no JVM is present; a further 90
   differential tests only collect when the matching engine is installed)
@@ -208,3 +209,20 @@ nothing else in this repo, including the guards written to protect it (F25).
 `grammar-clean` regenerates the parsers from the pinned grammars and fails on any diff. It
 is the check that keeps a pin edit from leaving the committed generated code disagreeing
 with the grammar it came from, and it needs a JVM -- set `JAVA_HOME` or have `java` on PATH.
+
+## Making a release
+
+Releases are made from `master`, by a human trigger, and never upload to PyPI
+(D20 in docs/decisions.md): a release is a tag plus a GitHub Release carrying the wheel.
+
+- **The normal path** is Actions → Release → Run workflow in the GitHub UI, choosing
+  `patch`/`minor`/`major`. The workflow runs the full CI matrix as its gate (ci.yml,
+  invoked as a reusable workflow), then calls `scripts/release.py` to bump the version,
+  write the changelog, commit, tag, push, build the wheel, and publish the GitHub Release.
+- **Locally** (review-before-push), same script with `--no-push`:
+  `scripts/release.py --bump minor --no-push` — inspect the commit and tag, then push by
+  hand. `--dry-run` prints the plan and writes nothing.
+- The version has exactly two homes — `version` in pyproject.toml and the
+  source-checkout fallback in src/sparkscreen/__init__.py — and the script is the only
+  thing that writes them. README carries no version literal on purpose: a copy there was
+  one more site to bump, and the audit (`_verify_readme.py`) now fails if one appears.
