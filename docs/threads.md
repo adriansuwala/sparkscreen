@@ -399,3 +399,32 @@ shape: a wrapper over the client's plan builder (or a wire proxy) walking
 `sql_command` to the existing pipeline. The EXPLAIN path (above) then downgrades from
 "backend input" to *differential oracle for the delegation* — it is how you prove the
 ANTLR path saw what the engine saw.
+
+**Deployment shape, verified in-process (2026-10-06).** The wire proxy is only one of
+the deployments, and the most expensive one. The interception point is the client
+object in the same process, before any network byte: with a spy in place of the gRPC
+stub (`client._stub` on pyspark 4.1.3), `spark.range(1).write.mode("overwrite")
+.saveAsTable("prod.users")` built the real `ExecutePlanRequest` and never left the
+process; `plan.command` walked to `(write_operation, prod.users, SAVE_MODE_OVERWRITE)`
+and `{WRITE_DATA, DESTROY_DATA}` with no server listening at all. A client wrapper
+(subclass or stub swap) is therefore a *gate*, not a tap: raising inside the stub
+blocks the write, the same enforcement shape as the MCP server in T3, minus the
+dependency. Session-level RPCs (`Config`) pass through; only `ExecutePlan` carries a
+plan. Cheap → expensive, the tiers are:
+
+1. **Static file scan** — what ships today; no engine at all.
+2. **In-process client wrapper** — zero infrastructure; screens and gates any code that
+   runs against Connect through that client. Bypass surface: a session constructed
+   without the wrapper, as with any hook.
+3. **EXPLAIN-before-execute on a session you already control** — the T8 text path as a
+   runtime gate, and the only plan-level option for *classic* sessions (their plans are
+   JVM-internal; Python never sees a typed plan to walk). Costs a JVM and one extra RPC
+   per statement; parses plan text pinned to that engine, not an arbitrary engine.
+4. **Wire proxy in front of a shared Connect server** — the MITM. Needed only when
+   clients are not under our control (shared cluster, org boundary); strictly the most
+   moving parts of the four.
+
+T8 proper (parsing EXPLAIN text) is not the local-scan screening surface — a local scan
+of a file needs no engine, and an engine-backed scan is a different weight class than
+the 12 ms no-JVM hook. Its verified value is (a) differential oracle in tests, and
+(b) tier 3 for sessions that exist at run time.
