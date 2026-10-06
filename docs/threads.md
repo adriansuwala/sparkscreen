@@ -428,3 +428,34 @@ T8 proper (parsing EXPLAIN text) is not the local-scan screening surface — a l
 of a file needs no engine, and an engine-backed scan is a different weight class than
 the 12 ms no-JVM hook. Its verified value is (a) differential oracle in tests, and
 (b) tier 3 for sessions that exist at run time.
+
+**Remote-kernel topology (JupyterHub + MCP over REST, 2026-10-06).** When the agent's
+code runs in a Jupyter kernel on a remote server, the plan exists only in that kernel
+process; the local machine never sees one, so the wrapper belongs there, not locally.
+Two things this topology seems to require but does not:
+
+- **No injected request.** Interception sees the request the kernel was *already*
+  sending — the plan is an argument to `ExecutePlan`, not a response to be fetched
+  (the spy experiment produced zero extra RPCs on the path).
+- **No serialization round-trip to a central sparkscreen.** The policy engine is pure
+  Python with no runtime JVM, so it installs in the kernel environment and answers
+  in-process; a `DENY` raises before the stub call, and the verdict travels back the
+  way cell output already does. Serializing the proto to a remote policy service is
+  possible (it is a wire format) but buys nothing unless policy must be centralized.
+
+What actually gets harder in this topology:
+
+- **Connect vs classic decides which tier exists.** A kernel whose `SparkSession` is
+  classic (spark:// master, cluster-side session — the common JHub setup) has no
+  client-side proto at all; the plan-level option there is the EXPLAIN gate (tier 3),
+  and the JVM is conveniently local to the kernel. A Connect kernel gets the wrapper.
+- **Installation is a managed-image problem:** a kernelspec or IPython startup hook
+  that wraps `SparkSession.Builder.getOrCreate`. Like any in-process gate, agent code
+  that constructs its own session bypasses it — a guardrail, not a boundary.
+- **The kernel's pyspark version is the pin** for the proto kind table, the same
+  per-environment matrix the grammars use.
+
+Meanwhile the static tier is unaffected and stays primary: the cell text crosses the
+REST API, so the MCP server — or the harness hook — screens it locally with today's
+sparkscreen before it is ever sent. The kernel tier exists to close the dynamic gap
+(f-string SQL the folder could not fold, DataFrame writes), not to replace the scan.
