@@ -16,10 +16,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
-# Runners are pinned to ubuntu-24.04, not ubuntu-latest: the latest label migrates to
+# Runners are pinned to ubuntu-26.04, not ubuntu-latest: the latest label migrates to
 # Ubuntu 26 on 2026-10-19 (actions/runner-images#14748), and a release gate must not
-# change OS underneath a tag that was verified on one. Bump this pin deliberately,
-# once the differential matrix has been run against 26 images -- not by label drift.
+# change OS underneath a tag that was verified on one. Pinning the explicit label
+# makes that migration a deliberate commit instead of label drift: the whole CI
+# matrix (fast, wheel, differential x3 engines, docs, grammar-build) runs on the
+# image on every PR and master push, so an image that breaks the suite fails here
+# first, not on release day. Bump this pin deliberately, per image, not by label.
 #
 # The actions are pinned to node24-native releases by full SHA (checkout v7.0.1,
 # setup-python v7.0.0, cache v6.1.0; setup-java v6.0.1 already was node24): the
@@ -46,7 +49,7 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.13", "3.12"]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -103,7 +106,7 @@ jobs:
     # The generated ANTLR parsers are committed and ship in the wheel, so the artefact
     # must import and screen on a machine with no JVM and no grammar sources. That is a
     # release property, and CI is the only place it is actually true.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -148,7 +151,7 @@ jobs:
     # grammar without adding a version here fails the fast suite instead of rotting.
     #
     # Needs a JVM and a real pyspark, so it is separate from the fast suite by design.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -203,7 +206,7 @@ jobs:
     # The four documentation audits. These are standalone scripts, NOT pytest tests, so
     # nothing else in CI runs them. They are cheap and they catch real staleness -- a
     # claim in README.md or docs/user-docs/ that has drifted from the code.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -268,7 +271,7 @@ jobs:
     # verified locally, regeneration reproduces the committed files byte for byte.
     # Nothing on the runtime path regenerates anything, so a failure here is a
     # maintainer signal ("run the build and commit"), not a broken install.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -325,7 +328,7 @@ jobs:
     # GitHub Release. Guarded by tests/test_release_mechanism.py, whose tripwire
     # fails if a registry upload is reintroduced here -- which is why this comment
     # describes it without naming it (the same lesson as F26).
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     strategy:
       fail-fast: false

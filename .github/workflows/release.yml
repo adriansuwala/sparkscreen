@@ -10,7 +10,7 @@ name: Release
 # a GitHub link (README, docs/roadmap.md). tests/test_release_mechanism.py
 # carries a tripwire so no workflow quietly grows an upload step.
 #
-# Runner pinned to ubuntu-24.04 and actions pinned to node24-native releases --
+# Runner pinned to ubuntu-26.04 and actions pinned to node24-native releases --
 # see the comment block in ci.yml for why (Ubuntu 26 label migration, Node 20
 # deprecation). Keep the three workflow files' pins in step.
 
@@ -45,7 +45,7 @@ jobs:
 
   release:
     needs: gate
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - name: Check out master with tags and full history
