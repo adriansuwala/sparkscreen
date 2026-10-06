@@ -78,7 +78,8 @@ SQLite DB and will silently disagree with a hand-edited JSONL.
 
 ## Current state (2026-10-04)
 
-- 0.8.0 — pre-1.0; see `sparkscreen.VERSION_NOTES` for why
+- version lives in `pyproject.toml` (single source of truth) and is bumped by
+  `scripts/release.py` — pre-1.0; see `sparkscreen.VERSION_NOTES` for why
 - 3,830 tests passing without a JVM, 3,941 with one (the extra 27 are the pin-identity
   guard, which generates parsers and is skipped when no JVM is present; a further 90
   differential tests only collect when the matching engine is installed)
@@ -186,6 +187,8 @@ The checks map onto CI jobs:
 |---|---|---|
 | `no-pyspark` | fast | nothing |
 | `fast` | fast | nothing |
+| `fuzz-fast-deep` | fuzz-deep (scheduled) | nothing |
+| `fuzz-deep` | fuzz-deep (scheduled) | a JVM and a pinned pyspark |
 | `wheel-contents` | wheel | `build` |
 | `wheel-install` | wheel | `build` |
 | `differential` | differential | a JVM and a pinned pyspark |
@@ -193,11 +196,33 @@ The checks map onto CI jobs:
 | `grammar-clean` | grammar-build | a JVM |
 | (pytest, in `fast`) | fast | nothing |
 
+The two `fuzz-*` checks run the same code paths as the per-push checks at scheduled-job
+depth (1000 Hypothesis examples per property; 2000 sweep mutants with a fresh seed per
+run). They are excluded from `--all` on purpose: depth is a scheduled-job concern, not a
+per-PR one. `.github/workflows/fuzz-deep.yml` calls them daily and on demand.
+
 `tests/test_ci_workflow.py` is the one guard with no `ci_checks.py` entry, because it is
-part of the fast suite rather than a separate gate. It parses every `run:` block in
-`.github/workflows/ci.yml` and hands each to `bash -n`: shell embedded in YAML is seen by
+part of the fast suite rather than a separate gate. It parses every `run:` block in every
+`.github/workflows/*.yml` file and hands each to `bash -n`: shell embedded in YAML is seen by
 nothing else in this repo, including the guards written to protect it (F25).
 
 `grammar-clean` regenerates the parsers from the pinned grammars and fails on any diff. It
 is the check that keeps a pin edit from leaving the committed generated code disagreeing
 with the grammar it came from, and it needs a JVM -- set `JAVA_HOME` or have `java` on PATH.
+
+## Making a release
+
+Releases are made from `master`, by a human trigger, and never upload to PyPI
+(D20 in docs/decisions.md): a release is a tag plus a GitHub Release carrying the wheel.
+
+- **The normal path** is Actions → Release → Run workflow in the GitHub UI, choosing
+  `patch`/`minor`/`major`. The workflow runs the full CI matrix as its gate (ci.yml,
+  invoked as a reusable workflow), then calls `scripts/release.py` to bump the version,
+  write the changelog, commit, tag, push, build the wheel, and publish the GitHub Release.
+- **Locally** (review-before-push), same script with `--no-push`:
+  `scripts/release.py --bump minor --no-push` — inspect the commit and tag, then push by
+  hand. `--dry-run` prints the plan and writes nothing.
+- The version has exactly two homes — `version` in pyproject.toml and the
+  source-checkout fallback in src/sparkscreen/__init__.py — and the script is the only
+  thing that writes them. README carries no version literal on purpose: a copy there was
+  one more site to bump, and the audit (`_verify_readme.py`) now fails if one appears.

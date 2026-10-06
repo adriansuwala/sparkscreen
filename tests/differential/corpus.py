@@ -77,6 +77,63 @@ VERSION_SPECIFIC_REJECTED: tuple[tuple[str, str], ...] = (
 )
 
 
+#: The canonical seed pool for the mutation sweeps, shared by the JVM-free property
+#: fuzz (tests/test_properties.py section 5) and the live-engine sweep
+#: (test_fuzz_against_real_spark.py). Mutating ONE pool is the point: the two layers
+#: fuzz the same surface, and the seed-completeness guard in test_properties.py
+#: asserts this pool reaches every destructive label in LABEL_EFFECTS, so destructive
+#: statement kinds cannot silently leave the fuzzed surface when seeds drift.
+FUZZ_SEEDS: tuple[str, ...] = (
+    # Reads: the benign half the sweeps must not scare into a verdict.
+    "select 1",
+    "select * from prod.t",
+    "select a from t1 where a > 1 group by a having count(*) > 1 order by a limit 5",
+    "with x as (select 1) select * from x",
+    # Destructive: namespaced objects. Each seed reaches one destructive label; the
+    # seed-completeness guard in test_properties.py enforces the mapping both ways.
+    "drop table prod.users",
+    "drop view prod.v",
+    "drop index i on t",
+    "drop schema prod.s",
+    "drop function f",
+    "truncate table t",
+    # Destructive: table shape, partitions, constraints.
+    "alter table t add column b int",
+    "alter table t drop column a",
+    "alter table t drop if exists partition (a = 1)",
+    "alter table t drop constraint c",          # parses on 4.1+ only
+    "alter table t replace columns (a int)",
+    "replace table t (a int) using parquet",
+    # Destructive: rows and writes.
+    "delete from t where id = 1",
+    "update t set a = 1",
+    "merge into prod.t using s on t.id = s.id when matched then update set *",
+    "insert into t values (1)",
+    "insert overwrite table prod.t select 1",
+    "insert overwrite directory '/tmp/x' select 1",          # the Hive-dir form
+    "insert overwrite directory '/tmp/x' using csv select 1",  # the tableProvider form
+    "insert into t replace where a > 1 select 1",   # InsertIntoReplaceWhere / BooleanCond
+    "insert into t replace using (a) select 1",     # 4.2 only
+    "insert into t replace on a > 1 values (2)",    # 4.2 only
+    "from s insert into t1 select 1 insert into t2 select 2",  # F26: crashes screen()
+    # Code loading.
+    "add jar /tmp/x.jar",
+    "create function f as 'x.y'",
+    "create function f(a int) returns int return a + 1",       # 4.x SQL UDF form
+    # Config: the INVALID_SET_SYNTAX divergence family (F27).
+    "set spark.sql.shuffle.partitions=200",
+    # Uppercase spellings. Real agent code is mostly lowercase and the corpus is
+    # written lowercase, but F6 came from exactly that assumption -- a few uppercase
+    # seeds keep the mutation pool case-honest.
+    "SELECT 1",
+    "SELECT * FROM prod.t",
+    "DROP TABLE prod.users",
+    "TRUNCATE TABLE t",
+    "SET spark.sql.shuffle.partitions=200",
+    "ALTER TABLE t ADD COLUMN b INT",
+)
+
+
 # ---------------------------------------------------------------------------
 # Per-engine expectations, recorded against three live engines.
 # ---------------------------------------------------------------------------
@@ -153,6 +210,32 @@ BOTH_FOUR_X_ACCEPTED: tuple[str, ...] = (
 BOTH_FOUR_X_ACCEPTED_WITHOUT_ENGINE_AGREEMENT: tuple[str, ...] = (
     "SELECT sum(a) OVER w FROM t WINDOW w AS (ORDER BY a)",
     "SELECT * FROM t TABLESAMPLE (10 PERCENT)",
+)
+
+
+#: Constructs where the engine's *grammar* accepts but the engine itself rejects
+#: before the statement is built. Discovered by the mutation fuzz (F27), confirmed on
+#: live 3.5.1 / 4.1.3 / 4.2.0 via `parsePlan`. The engine's *grammar* accepts each of
+#: these -- `SET .*?` matches the first family, and the type rule deliberately matches
+#: an identifier for the second -- but the engine's AST builder rejects them with the
+#: error class recorded per row. sparkscreen parses with the grammar and therefore
+#: accepts them: the recorded divergence class. Screened verdicts stay fail-closed
+#: (REVIEW and DENY respectively), so the gap costs a confident verdict on SQL the
+#: engine will never run, not a wrong verdict on SQL it will.
+#:
+#: These rows are the *evidence list*, not the tolerance set. The sweep
+#: (test_fuzz_against_real_spark.py) tolerates by the engine's error CLASS -- see
+#: TOLERATED_REJECTION_CLASSES there -- because the deep scheduled sweep generates
+#: dozens of members per family, which no exact-string set tracks. A new member with a
+#: KNOWN class is tolerated and printed; a member with PARSE_SYNTAX_ERROR (grammar
+#: level, a port defect) or an unrecognised class fails the sweep. New evidence rows
+#: still belong here, with the class that was observed.
+KNOWN_AST_LAYER_REJECTIONS: tuple[tuple[str, str], ...] = (
+    ("SET (spark.sql.shuffle.partitions=200)", "INVALID_SET_SYNTAX"),
+    ("set( spark.sql.shuffle.partitions=200)", "INVALID_SET_SYNTAX"),
+    ("ALTER TABLE t ADD COLUMN b unionINT", "UNSUPPORTED_DATATYPE"),
+    ("alter table t add column b intunion", "UNSUPPORTED_DATATYPE"),
+    ("alter table t add column b partitionint", "UNSUPPORTED_DATATYPE"),
 )
 
 

@@ -7,7 +7,7 @@ name = "sparkscreen"
 # Single source of truth for the version. src/sparkscreen/__init__.py reads this via
 # importlib.metadata rather than hardcoding it, so there is one place to bump.
 # tests/test_packaging.py asserts they agree.
-version = "0.8.0"
+version = "0.9.0"
 description = "Static safety screening for agent-written PySpark, using real parsers"
 readme = "README.md"
 requires-python = ">=3.10"

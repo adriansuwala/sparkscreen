@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import venv
 import zipfile
 from pathlib import Path
@@ -342,6 +343,25 @@ def check_wheel_installs_and_screens(wheel: Path | None = None) -> str:
         return "wheel installs standalone and screens with no JVM on PATH"
 
 
+def _verify_engine(py: str, engine: str | None) -> None:
+    """Refuse to compare one engine against another's expectations.
+
+    The `bp4` lesson: a mismatched `--engine` would otherwise run one engine's suite
+    against another engine's recorded behaviour, and every disagreement would be a
+    phantom. Called by every check that talks to a live engine.
+    """
+    if not engine:
+        return
+    proc = subprocess.run([py, "-c", "import pyspark; print(pyspark.__version__)"],
+                          capture_output=True, text=True)
+    found = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "?"
+    if found != engine:
+        raise CheckFailure(
+            f"interpreter has pyspark {found}, not {engine}.\n"
+            f"  Pass --interpreter pointing at a venv with pyspark=={engine}."
+        )
+
+
 def check_differential(engine: str | None = None,
                         interpreter: str | None = None) -> str:
     """Run the differential suite against one engine.
@@ -350,15 +370,7 @@ def check_differential(engine: str | None = None,
     explicit in CI; locally the installed engine is the useful default.
     """
     py = interpreter or _python()
-    if engine:
-        proc = subprocess.run([py, "-c", "import pyspark; print(pyspark.__version__)"],
-                              capture_output=True, text=True)
-        found = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "?"
-        if found != engine:
-            raise CheckFailure(
-                f"interpreter has pyspark {found}, not {engine}.\n"
-                f"  Pass --interpreter pointing at a venv with pyspark=={engine}."
-            )
+    _verify_engine(py, engine)
     proc = subprocess.run([py, "-m", "pytest", "tests/differential/", "-q",
                            "-p", "no:cacheprovider"], capture_output=True, text=True)
     out = (proc.stdout + proc.stderr).strip()
@@ -389,6 +401,93 @@ def check_differential(engine: str | None = None,
     return f"differential vs pyspark {engine or 'installed'}: {summary}"
 
 
+def check_fuzz_fast_deep() -> str:
+    """Deep mutation fuzz over the property suite (no JVM; scheduled-job depth).
+
+    The same tests the fast job runs, at 1000 Hypothesis examples per property instead
+    of 40. Depth is a scheduled-job concern: the fast suite shares a ~35s budget with
+    ~3,800 other tests and can only afford a taste of each property.
+    """
+    report = _junit_report("fuzz-fast-deep")
+    _run([_python(), "-m", "pytest", "tests/test_properties.py", "-q",
+          "--junitxml", str(report)],
+         what="deep property fuzz",
+         env=dict(os.environ, HYPOTHESIS_PROFILE="sparkscreen-deep"))
+    _assert_ran_cleanly(report, "deep property fuzz")
+    return "deep property fuzz passed (no JVM, 1000 examples/property)"
+
+
+def _junit_report(name: str) -> Path:
+    """A JUnit XML path under the scratch dir, for the ran-not-skipped assertions."""
+    return Path(tempfile.mkdtemp(prefix=f"sparkscreen-{name}-")) / "junit.xml"
+
+
+def _assert_ran_cleanly(report: Path, what: str) -> None:
+    """Fail when a junit report shows zero tests, skips, failures, or errors.
+
+    The reason this is an XML readout, not a console grep: this file's pytest addopts
+    add a second -q, and -q -q suppresses the summary line a grep would look for --
+    the grep then passes on output that shows a run happened but says nothing about
+    its outcome. And an importorskip-gated test exits 0 having run nothing: a skip
+    must be a failed check, not a quiet pass.
+
+    xfail pins are junit `skipped` testcases with type "pytest.xfail"; they are this
+    suite's tracked-open-gaps convention, so only skips with a DIFFERENT type -- a
+    real skip, e.g. pyspark absent -- fail the check.
+    """
+    import xml.etree.ElementTree as ET
+
+    root = ET.parse(report).getroot()
+    suite = root if root.tag == "testsuite" else root.find("testsuite")
+    assert suite is not None, f"junit report has no testsuite element: {report}"
+    tests = int(suite.get("tests", "0"))
+    failures = int(suite.get("failures", "0"))
+    errors = int(suite.get("errors", "0"))
+    real_skips = 0
+    for case in suite.iter("testcase"):
+        for skipped in case.findall("skipped"):
+            if skipped.get("type") != "pytest.xfail":
+                real_skips += 1
+    if tests == 0 or real_skips or failures or errors:
+        raise CheckFailure(
+            f"{what} did not run cleanly: tests={tests}, failures={failures}, "
+            f"real skips={real_skips}, errors={errors}. A real skip (one whose junit "
+            f"type is not pytest.xfail) means a dependency is absent from "
+            f"{_python()} -- this check must never pass vacuously.")
+
+
+def check_fuzz_deep(engine: str | None = None, interpreter: str | None = None) -> str:
+    """Deep differential fuzz against one engine (--engine, --interpreter).
+
+    The seeded mutation sweep the differential job runs at 250 mutants with a fixed
+    seed, at scheduled depth (2000 mutants) with a fresh seed, so each scheduled run
+    explores mutants no previous run -- here or on any push -- ever generated. A new
+    engine divergence surfaces here first; the failing SQL is classified by the
+    engine's error class (see TOLERATED_REJECTION_CLASSES). Needs a JVM, like
+    `differential`.
+
+    The engine verification and the ran-not-skipped assertion carry the same two
+    lessons as `check_differential`: a mismatched engine compares one engine against
+    another's behaviour, and an importorskip-gated test exits 0 having run nothing.
+    """
+    py = interpreter or _python()
+    _verify_engine(py, engine)
+    seed = str(int(time.time()))
+    report = Path(tempfile.mkdtemp(prefix="sparkscreen-fuzz-deep-")) / "junit.xml"
+    _run([py, "-m", "pytest", "tests/differential/test_fuzz_against_real_spark.py",
+          "-q", "--junitxml", str(report)],
+         what="deep differential fuzz",
+         env=dict(os.environ, SPARKSCREEN_FUZZ_MUTANTS="2000",
+                  SPARKSCREEN_FUZZ_SEED=seed))
+    # The test's outcome comes from the JUnit XML, not the console: this file's own
+    # pytest addopts make `-q` double, which suppresses the summary line the obvious
+    # grep would look for. A skipped test (pyspark absent) must fail this check, not
+    # pass it vacuously.
+    _assert_ran_cleanly(report, "deep differential fuzz")
+    return (f"deep differential fuzz vs pyspark {engine or 'installed'} passed "
+            f"(2000 mutants, seed {seed})")
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -398,13 +497,20 @@ CHECKS = {
     "fast": check_fast_suite,
     "audits": check_audits,
     "grammar-clean": check_grammar_regenerates_clean,
+    "fuzz-fast-deep": check_fuzz_fast_deep,
+    "fuzz-deep": check_fuzz_deep,
     "wheel-contents": check_wheel_contents,
     "wheel-install": check_wheel_installs_and_screens,
 }
 
 #: Checks that need something a bare checkout will not have. `all` runs the rest and
 #: reports these as skipped rather than failing.
-NEEDS_EXTERNAL = ("differential",)
+NEEDS_EXTERNAL = ("differential", "fuzz-deep")
+
+#: Deep-fuzz checks: the same code paths as the per-push checks, at scheduled-job
+#: depth. Opt-in by name so `--all` stays a per-PR-sized run; `--list` shows them and
+#: the `fuzz-deep` workflow in .github/workflows/ calls them on a schedule.
+EXCLUDED_FROM_ALL = ("fuzz-fast-deep", "fuzz-deep")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -424,7 +530,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.all or not args.checks:
-        selected = list(CHECKS)
+        selected = [c for c in CHECKS if c not in EXCLUDED_FROM_ALL]
         if args.engine or args.interpreter:
             selected.append("differential")
     else:
@@ -435,11 +541,13 @@ def main(argv: list[str] | None = None) -> int:
 
     failures, skipped = [], []
     for name in selected:
-        label = f"{name}" + (f" [{args.engine}]" if name == "differential" and args.engine else "")
+        label = f"{name}" + (f" [{args.engine}]" if name in ("differential", "fuzz-deep") and args.engine else "")
         print(f"── {label}", flush=True)
         try:
             if name == "differential":
                 print(f"   {check_differential(args.engine, args.interpreter)}")
+            elif name == "fuzz-deep":
+                print(f"   {check_fuzz_deep(args.engine, args.interpreter)}")
             else:
                 print(f"   {CHECKS[name]()}")
         except CheckFailure as exc:
