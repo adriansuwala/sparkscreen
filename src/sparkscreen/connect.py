@@ -24,6 +24,8 @@ a plan needs no JVM. Holding a *session* needs whatever the session needs.
 
 from __future__ import annotations
 
+import sys
+
 from .model import Report, Verdict
 from .plans import screen_plan
 from .policy import Policy
@@ -91,6 +93,18 @@ class ScreeningStub:
         return rpc
 
 
+def _stub_attr(client) -> str:
+    """The gRPC stub attribute this wheel uses, asserted rather than guessed."""
+    for attr in ("_stub", "_internal_stub"):
+        if hasattr(client, attr):
+            return attr
+    raise RuntimeError(
+        "no gRPC stub attribute found on this SparkConnectClient "
+        f"(looked for _stub, _internal_stub on {type(client).__name__}); "
+        "this wheel is newer than the ones sparkscreen.connect knows"
+    )
+
+
 def install_gate(client, policy: Policy | None = None, on_report=None) -> ScreeningStub:
     """Screen every plan a Spark Connect client sends, in place.
 
@@ -104,25 +118,15 @@ def install_gate(client, policy: Policy | None = None, on_report=None) -> Screen
     asserted rather than guessed: if a future wheel renames it, this raises instead
     of silently wrapping nothing.
     """
-    for attr in ("_stub", "_internal_stub"):
-        if hasattr(client, attr):
-            previous = getattr(client, attr)
-            setattr(client, attr, ScreeningStub(previous, policy, on_report))
-            return previous
-    raise RuntimeError(
-        "no gRPC stub attribute found on this SparkConnectClient "
-        f"(looked for _stub, _internal_stub on {type(client).__name__}); "
-        "this wheel is newer than the ones sparkscreen.connect knows"
-    )
+    attr = _stub_attr(client)
+    previous = getattr(client, attr)
+    setattr(client, attr, ScreeningStub(previous, policy, on_report))
+    return previous
 
 
 def restore_gate(client, previous) -> None:
     """Put back the stub `install_gate` returned."""
-    for attr in ("_stub", "_internal_stub"):
-        if hasattr(client, attr):
-            setattr(client, attr, previous)
-            return
-    raise RuntimeError("no stub attribute to restore")
+    setattr(client, _stub_attr(client), previous)
 
 
 def gated_session_builder(policy: Policy | None = None, on_report=None):
@@ -160,3 +164,134 @@ def gated_session_builder(policy: Policy | None = None, on_report=None):
         return obj
 
     return GatedBuilder()
+
+
+# ---------------------------------------------------------------------------
+# the capture path: get the plan out of the kernel, screen it anywhere
+# ---------------------------------------------------------------------------
+
+
+class PlanCaptured(RuntimeError):
+    """The capture stub stopped a snippet at its first `ExecutePlan`.
+
+    Carries one capture record -- `{"plan": <json dict>, "pyspark_version": str}`
+    (plus `"proto"` when requested) -- as `.capture`.
+    """
+
+    def __init__(self, capture: dict) -> None:
+        self.capture = capture
+        super().__init__("plan captured before it was sent")
+
+
+def _serialize_plan(plan, *, keep_proto: bool = False) -> dict:
+    """One capture record: the plan as a self-describing JSON dict, plus its pin.
+
+    `preserving_proto_field_name` keeps snake_case, so field names in the
+    projection match the attribute names the walker reads. The pyspark version
+    travels with the plan because *that* engine is the grammar pin -- the machine
+    that screens the projection may have no pyspark at all.
+    """
+    import json
+
+    import pyspark
+    from google.protobuf import json_format
+
+    record = {
+        "plan": json.loads(
+            json_format.MessageToJson(plan, preserving_proto_field_name=True)
+        ),
+        "pyspark_version": pyspark.__version__,
+    }
+    if keep_proto:
+        record["proto"] = plan
+    return record
+
+
+class CaptureStub:
+    """A gRPC-stub stand-in that captures `ExecutePlan` instead of sending it.
+
+    The capture tool's stub, the tap-shaped sibling of `ScreeningStub`:
+    `ExecutePlan` is serialized and never sent -- raising `PlanCaptured` unwinds
+    the snippet at its first plan send. Everything else passes through, with one
+    deliberate exception: `Config` is answered locally with an empty response,
+    because the client's plan *building* fetches two compression keys via `Config`
+    before its first plan (T8) and an empty response reads both as unset, which
+    disables compression and lets capture run with no server at all. Set
+    `config_passthrough` to hand `Config` to the real server instead (deployments
+    that have one, snippets that read `spark.conf`).
+    """
+
+    def __init__(self, inner, *, config_passthrough: bool = False,
+                 keep_proto: bool = False) -> None:
+        self._inner = inner
+        self._config_passthrough = config_passthrough
+        self._keep_proto = keep_proto
+        self.captured = 0
+
+    def __getattr__(self, name):
+        inner_attr = getattr(self._inner, name)
+        if name == "ExecutePlan":
+            def rpc(request, *args, **kwargs):
+                plan = request.plan if hasattr(request, "plan") else request
+                self.captured += 1
+                raise PlanCaptured(_serialize_plan(plan, keep_proto=self._keep_proto))
+            return rpc
+        if name == "Config" and not self._config_passthrough:
+            def config(request, *args, **kwargs):
+                return base_pb2.ConfigResponse()
+            return config
+        return inner_attr
+
+
+def capture_plans(source: str, session=None, globs=None, *,
+                  config_passthrough: bool = False, keep_proto: bool = False) -> dict:
+    """Run `source` and capture the plan it tries to send, without sending it.
+
+    The Jupyter-side half of the two-tool design (T9 in docs/threads.md): the
+    kernel has pyspark and the session's Python state resolved, so DataFrame code
+    assembles its real typed plan here. This runs the snippet with the client's
+    stub replaced by a `CaptureStub` and returns what it tried to send::
+
+        {"captures": [{"plan": {...}, "pyspark_version": "4.1.3"}]}
+
+    The machine that received this screens the projection locally with
+    ``sparkscreen.plans.screen_plan(sparkscreen.plans.JsonPlan(cap["plan"]),
+    engine_version=cap["pyspark_version"])`` -- no pyspark needed there.
+
+    The snippet runs to its FIRST plan send and stops there (`PlanCaptured`
+    unwinds it); a snippet that sends nothing yields an empty captures list, and
+    the snippet's own exceptions propagate untouched. `globs` defaults to the
+    caller's globals -- the same namespace the snippet would run in for real, so
+    `spark` and every earlier cell's imports are visible.
+
+    This is the *advisory* half: nothing here stops another tool from executing
+    the code anyway. The enforcing variant -- hold the request, replay on
+    approval -- is recorded as T9, deliberately not built yet.
+    """
+    if session is None:
+        from pyspark.sql import SparkSession
+        session = SparkSession.getActiveSession()
+        if session is None:
+            raise RuntimeError(
+                "capture_plans found no active Spark session; pass one "
+                "explicitly (session=...) or create it first"
+            )
+    client = getattr(session, "client", None)
+    if client is None:
+        raise RuntimeError(
+            f"{type(session).__name__} has no Connect client; capture_plans works "
+            "on Spark Connect sessions only (classic sessions have no client-side "
+            "plan to capture)"
+        )
+    attr = _stub_attr(client)
+    previous = getattr(client, attr)
+    setattr(client, attr, CaptureStub(previous, config_passthrough=config_passthrough,
+                                      keep_proto=keep_proto))
+    ns = globs if globs is not None else sys._getframe(1).f_globals
+    try:
+        exec(source, ns)
+    except PlanCaptured as exc:
+        return {"captures": [exc.capture]}
+    finally:
+        setattr(client, attr, previous)
+    return {"captures": []}

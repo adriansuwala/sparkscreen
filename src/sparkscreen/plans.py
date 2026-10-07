@@ -22,9 +22,12 @@ already resolved -- the client built it from a real DataFrame -- so both are fac
     stays the single source of truth and this module adds only the operations plans
     carry natively.
 
-Import contract: importing this module requires pyspark's proto modules but NOT a
-JVM, a session, or grpc (the transport; only the messages are touched). Everything
-that touches a *live* client lives in `connect.py`.
+Import contract: screening a *plan proto* needs pyspark's proto modules -- no JVM, no
+grpc, no session. Screening a *JSON projection* (`JsonPlan`, what `connect.capture_plans`
+ships to the local machine) needs none of that -- the local end of the capture path runs
+sparkscreen with zero pyspark. Only the descriptor-derived checks (`relation_kinds`,
+`command_kinds`, `kind_drift`) require the wheel. Everything that touches a *live*
+client lives in `connect.py`.
 """
 
 from __future__ import annotations
@@ -35,17 +38,25 @@ from .analysis.effects import denies_regardless_of_namespace
 from .model import Effect, Finding, Reason, Report, Severity, Verdict
 from .policy import Policy, default_policy
 
-# The proto import is deliberately at module level with a plain ImportError so the
-# failure mode is legible: this backend needs a pyspark wheel, not a JVM.
+# The proto import is deliberately optional: the capture path screens a JSON
+# projection on a machine that has no pyspark at all, and only the
+# descriptor-derived checks need the wheel. The failure mode is legible either way.
 try:
     from pyspark.sql.connect.proto import Command, Plan, Relation  # noqa: F401
-    from pyspark.sql.connect.proto import commands_pb2
+    _HAVE_PROTO = True
+    _PROTO_ERROR: Exception | None = None
 except ImportError as _e:  # pragma: no cover - depends on environment
-    raise ImportError(
-        "sparkscreen.plans needs pyspark's Connect proto modules "
-        "(pyspark.sql.connect.proto); install pyspark in this environment "
-        f"(underlying error: {_e})"
-    ) from None
+    _HAVE_PROTO = False
+    _PROTO_ERROR = _e
+
+
+def require_proto() -> None:
+    """Raise a legible error when a descriptor-derived check runs without pyspark."""
+    if not _HAVE_PROTO:
+        raise ImportError(
+            "this sparkscreen.plans check needs pyspark's Connect proto modules "
+            f"(underlying error: {_PROTO_ERROR})"
+        ) from _PROTO_ERROR
 
 
 # ---------------------------------------------------------------------------
@@ -55,11 +66,15 @@ except ImportError as _e:  # pragma: no cover - depends on environment
 
 def relation_kinds() -> tuple[str, ...]:
     """Every `Relation` kind this wheel can express, derived from the oneof."""
+    require_proto()
+    assert _HAVE_PROTO  # narrowing for the type checker; require_proto raised otherwise
     return tuple(f.name for f in Relation.DESCRIPTOR.oneofs[0].fields)
 
 
 def command_kinds() -> tuple[str, ...]:
     """Every `Command` kind this wheel can express, derived from the oneof."""
+    require_proto()
+    assert _HAVE_PROTO  # narrowing for the type checker; require_proto raised otherwise
     return tuple(f.name for f in Command.DESCRIPTOR.oneofs[0].fields)
 
 
@@ -159,6 +174,19 @@ _COMMAND_EFFECTS: dict[str, frozenset[Effect]] = {
 _FIELD_REFINED_KINDS: tuple[str, ...] = ("write_operation", "write_operation_v2")
 
 
+#: The mode spellings that discard existing data, in both wire forms: the enum
+#: *values* as pinned from the wheels' `_pb2.pyi` (identical on 3.5.1 / 4.1.3 /
+#: 4.2.0 -- proto enum numbers are wire-stable) and the enum *names* as
+#: `json_format` emits them in the JSON projection the capture path ships. The
+#: proto/JSON equivalence is a differential property, not an assumption.
+_SAVE_MODE_OVERWRITE = (2, "SAVE_MODE_OVERWRITE")
+_V2_DESTROY_MODES = (
+    2, "MODE_OVERWRITE",
+    5, "MODE_REPLACE",
+    6, "MODE_CREATE_OR_REPLACE",
+)
+
+
 def _write_operation_effects(cmd) -> frozenset[Effect]:
     """Effects for one `write_operation`, refined by its typed fields.
 
@@ -175,7 +203,7 @@ def _write_operation_effects(cmd) -> frozenset[Effect]:
         # A path/source write reaches outside the warehouse: the same reasoning that
         # gives static `save`/`jdbc` their REACHES_EXTERNAL.
         effects.add(Effect.REACHES_EXTERNAL)
-    if wo.mode == commands_pb2.WriteOperation.SaveMode.SAVE_MODE_OVERWRITE:
+    if wo.mode in _SAVE_MODE_OVERWRITE:
         effects.add(Effect.DESTROY_DATA)
     return frozenset(effects)
 
@@ -184,11 +212,7 @@ def _write_operation_v2_effects(cmd) -> frozenset[Effect]:
     """Effects for one `write_operation_v2`, refined by its typed `Mode`."""
     wo = cmd.write_operation_v2
     effects: set[Effect] = {Effect.WRITE_DATA}
-    if wo.mode in (
-        commands_pb2.WriteOperationV2.MODE_OVERWRITE,
-        commands_pb2.WriteOperationV2.MODE_REPLACE,
-        commands_pb2.WriteOperationV2.MODE_CREATE_OR_REPLACE,
-    ):
+    if wo.mode in _V2_DESTROY_MODES:
         # The modes that can discard existing data. MODE_CREATE cannot -- the SQL
         # analogue is CreateTable, which is WRITE_SCHEMA-only -- and neither does
         # MODE_OVERWRITE_PARTITIONS beyond the named partitions.
@@ -253,7 +277,7 @@ class PlanCommand:
     """
 
     kind: str
-    effects: frozenset[Effect]
+    effects: frozenset[Effect] | None
     target: str | None
     target_known: bool
     sql: str | None = None
@@ -274,9 +298,15 @@ def extract_commands(plan: Plan) -> list[PlanCommand]:
         if kind == "sql_command":
             sc = cmd.sql_command
             sql = sc.sql or None
-            if not sql and "input" in sc.DESCRIPTOR.fields_by_name and sc.HasField("input"):
-                # 4.1.x embeds the SQL as a nested relation; 3.5.x has no such field.
-                sql = _sql_from_embedded(sc.input)
+            if not sql:
+                try:
+                    if sc.HasField("input"):
+                        # 4.1.x embeds the SQL as a nested relation.
+                        sql = _sql_from_embedded(sc.input)
+                except ValueError:
+                    # 3.5.x has no `input` field on SqlCommand at all -- HasField
+                    # raises instead of returning False, and that is the pin.
+                    pass
             out.append(PlanCommand(
                 kind="sql_command",
                 effects=frozenset(),
@@ -285,14 +315,25 @@ def extract_commands(plan: Plan) -> list[PlanCommand]:
                 sql=sql,
             ))
         else:
+            try:
+                effects = command_effects(cmd)
+            except UnmappedKindError:
+                # A kind this table has never seen is a *pin mismatch* (the
+                # docstring of UnmappedKindError says when it is a bug instead).
+                # Preserve the kind; screen_plan reports UNKNOWN -- fail closed --
+                # rather than crashing the walk. `command_effects` itself still
+                # raises, which is what keeps the table honest in tests.
+                effects = None
             out.append(PlanCommand(
                 kind=kind,  # type: ignore[arg-type]
-                effects=command_effects(cmd),
+                effects=effects,
                 target=_target_of(cmd, kind),          # type: ignore[arg-type]
                 target_known=_target_known(cmd, kind),  # type: ignore[arg-type]
             ))
-    root_kind = plan.root.WhichOneof("rel_type")
-    if root_kind == "sql" and plan.root.sql.query:
+    root = plan.root
+    root_kind = root.WhichOneof("rel_type") if root is not None else None
+    sql_node = root.sql if root is not None else None
+    if root_kind == "sql" and sql_node is not None and sql_node.query:
         out.append(PlanCommand(
             kind="sql_command(root)",
             effects=frozenset(),
@@ -348,12 +389,69 @@ def _target_known(cmd, kind: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# the JSON projection adapter
+# ---------------------------------------------------------------------------
+
+
+def _wrap(value):
+    """Wrap a decoded-JSON value so nested messages walk like protos."""
+    if isinstance(value, dict):
+        return JsonPlan(value)
+    return value
+
+
+class JsonPlan:
+    """A `json_format` projection of a plan message, duck-typed to the proto.
+
+    `connect.capture_plans` serializes a captured plan on the kernel (which has
+    pyspark); the machine that screens it may not. The projection is still
+    screenable because it is self-describing: a oneof's *set* field is the only
+    key `json_format` emits for it, and enum values appear as their names. This
+    adapter reproduces exactly the interface the walker touches -- `HasField`,
+    `WhichOneof`, attribute access -- and deliberately nothing more.
+
+    Absent fields read as `None` (scalars) or fail `HasField` (messages); an
+    empty or multi-key message dict yields `WhichOneof` None, which the walker
+    turns into UNKNOWN -- fail closed, like every other unreadable shape.
+    """
+
+    __slots__ = ("_d",)
+
+    def __init__(self, data: dict) -> None:
+        self._d = data
+
+    def HasField(self, name: str) -> bool:
+        return self._d.get(name) is not None
+
+    def WhichOneof(self, oneof: str) -> str | None:
+        # Command and Relation carry *only* their oneof -- with one documented
+        # exception: 4.x Relation also has `common` (RelationCommon: plan ids)
+        # outside the oneof, seen in the T8 captures as `common{...} sql{...}`.
+        # Skip it; the single remaining present key IS the kind. The equivalence
+        # with the proto reading of the same plan is pinned by the differential
+        # suite on every engine wheel.
+        keys = [k for k in self._d if k != "common"]
+        return keys[0] if len(keys) == 1 else None
+
+    def __getattr__(self, name: str):
+        return _wrap(self._d.get(name))
+
+
+# ---------------------------------------------------------------------------
 # screening
 # ---------------------------------------------------------------------------
 
 
-def screen_plan(plan: Plan, policy: Policy | None = None) -> Report:
-    """Screen one Spark Connect `Plan` proto against `policy`.
+def screen_plan(plan, policy: Policy | None = None, engine_version: str | None = None) -> Report:
+    """Screen one Spark Connect `Plan` (proto or `JsonPlan`) against `policy`.
+
+    `engine_version` is the pyspark version of the engine whose plan this is --
+    what `connect.capture_plans` reports for a projection captured on a remote
+    kernel. The SQL delegation inside a plan pins its grammar to that version,
+    *not* to the local pyspark (a local machine screening a captured plan may
+    have no pyspark at all, and its version would be the wrong pin anyway).
+    With no `engine_version`, the running pyspark is used; with neither, the
+    SQL inside the plan is UNKNOWN, not guessed.
 
     The plan-level counterpart of `screen()`: one report per plan, one finding per
     command. Verdict semantics match the static path exactly:
@@ -378,7 +476,7 @@ def screen_plan(plan: Plan, policy: Policy | None = None) -> Report:
     commands = extract_commands(plan)
     for ordinal, pc in enumerate(commands):
         if pc.kind == "sql_command" or pc.kind == "sql_command(root)":
-            _eval_plan_sql(report, policy, pc, ordinal)
+            _eval_plan_sql(report, policy, pc, ordinal, engine_version)
         elif pc.kind not in _COMMAND_EFFECTS and pc.kind not in _FIELD_REFINED_KINDS:
             report.add(Finding(
                 verdict=Verdict.UNKNOWN,
@@ -456,17 +554,35 @@ def _eval_plan_command(report: Report, policy: Policy, pc: PlanCommand) -> None:
         ))
 
 
-def _eval_plan_sql(report: Report, policy: Policy, pc: PlanCommand, ordinal: int) -> None:
+def _eval_plan_sql(report: Report, policy: Policy, pc: PlanCommand, ordinal: int,
+                   engine_version: str | None = None) -> None:
     """Delegate a plan's `sql_command` to the ANTLR pipeline.
 
     One SQL path, deliberately shared with the static side -- but the entry point is
     the parser, not `screen()`: a plan carries raw SQL text, and `screen()` parses
-    *Python source* to find it. The grammar is chosen from the running kernel's own
-    pyspark version (the pin, exactly as the differential suite pins engines), so a
-    kernel on Spark 3.5.1 screens with the 3.5.1 grammar. Findings are re-anchored
-    to the command ordinal because plans have no source lines.
+    *Python source* to find it. The grammar is chosen from `engine_version` -- the
+    engine whose plan this is (the capture path reports the remote kernel's) -- or
+    from the running pyspark when that is not supplied, so a kernel on Spark 3.5.1
+    screens with the 3.5.1 grammar. Findings are re-anchored to the command ordinal
+    because plans have no source lines.
     """
-    import pyspark
+    version = engine_version
+    if version is None:
+        try:
+            import pyspark
+            version = pyspark.__version__
+        except ImportError:
+            report.add(Finding(
+                verdict=Verdict.UNKNOWN,
+                reason=Reason.UNSUPPORTED_SPARK_VERSION,
+                message="the plan carries no engine version and this environment has "
+                        "no pyspark, so no pinned grammar could be chosen for its SQL; "
+                        "not analyzed",
+                severity=Severity.HIGH,
+                statement="connect.sql_command",
+                line=ordinal,
+            ))
+            return
 
     from .grammar.parser import SqlParser, SqlSyntaxError, get_parser
     from .grammar.spec import spec_for_spark_version
@@ -484,12 +600,12 @@ def _eval_plan_sql(report: Report, policy: Policy, pc: PlanCommand, ordinal: int
         return
 
     try:
-        spec = spec_for_spark_version(pyspark.__version__)
+        spec = spec_for_spark_version(version)
     except KeyError:
         report.add(Finding(
             verdict=Verdict.UNKNOWN,
             reason=Reason.UNSUPPORTED_SPARK_VERSION,
-            message=f"kernel runs pyspark {pyspark.__version__}, which has no pinned "
+            message=f"engine runs pyspark {version}, which has no pinned "
                     "grammar; the SQL inside this plan was not analyzed",
             severity=Severity.HIGH,
             statement="connect.sql_command",

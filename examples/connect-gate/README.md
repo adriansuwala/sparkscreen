@@ -101,3 +101,41 @@ PATH.
   `tests/differential/test_connect_gate_live.py` on a real client, and proven
   end-to-end against a real 4.1.3 Connect server (blocked overwrite; the
   server-side table was untouched afterward).
+
+## The two-tool design: capture the plan, screen it anywhere
+
+For the harness topology where sparkscreen lives on the *local* machine and the
+kernel is remote, the kernel side exposes one call that returns the typed plan a
+snippet would send — without sending it, and without a server behind it:
+
+```python
+# Jupyter-side tool body (the kernel has pyspark and the session's state):
+from sparkscreen.connect import capture_plans
+import json
+
+result = capture_plans(SNIPPET)   # runs SNIPPET in the caller's globals
+print(json.dumps(result))         # cell output = the tool's response
+```
+
+```python
+# Local side (sparkscreen installed, pyspark NOT required):
+from sparkscreen.plans import JsonPlan, screen_plan
+
+report = screen_plan(JsonPlan(cap["plan"]), engine_version=cap["pyspark_version"])
+```
+
+What the capture guarantees, all differential-tested per wheel:
+
+- The snippet runs to its **first plan send** and stops there; the plan it built is
+  returned as a self-describing JSON projection plus the kernel's pyspark version
+  (that version is the grammar pin for the SQL inside the plan — the local machine
+  may have no pyspark at all).
+- Plan *building* works offline: the capture stub answers the client's `Config`
+  prefetch locally (4.x fetches two compression keys before its first plan), so no
+  server is needed for the capture itself.
+- A snippet that never sends a plan returns an empty captures list; its own
+  exceptions propagate, and the original stub is always restored.
+
+This is the advisory half of the design — the enforcing variant ("hold the request,
+replay it only after the verdict allows") is T9 in `docs/threads.md`, deliberately
+not built yet.

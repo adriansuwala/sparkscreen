@@ -459,3 +459,42 @@ Meanwhile the static tier is unaffected and stays primary: the cell text crosses
 REST API, so the MCP server — or the harness hook — screens it locally with today's
 sparkscreen before it is ever sent. The kernel tier exists to close the dynamic gap
 (f-string SQL the folder could not fold, DataFrame writes), not to replace the scan.
+
+## T9 — the two-tool design: capture the plan, custody the request (2026-10-06)
+
+The topology this thread reasons about has *two* remotes: the local harness machine,
+a Jupyter kernel (pyspark, Connect client) as the execution point, and the Spark
+cluster behind it. Connect only ever carries typed plans *upstream* (client → server)
+— the server never returns one, and `EXPLAIN` returns render text, not a grammar —
+so "send code to the remote, get a typed plan back" is impossible as stated. But the
+plan is a *local artifact of the kernel*: the client assembles it before any send
+(proven in T8), so a kernel-side capture stub can hand it over without a server, and
+the screening can happen wherever the policy lives.
+
+Built (the advisory half), in `connect.capture_plans`:
+
+- The capture stub takes the assembled `ExecutePlan` apart before the wire and
+  ships the plan as a `json_format` projection plus the kernel's pyspark version.
+  Plan *building* needs no server either: 4.x prefetches two compression keys via
+  `Config` before its first plan, and the stub answers that locally (empty response
+  reads as compression disabled). `AnalyzePlan` passes through — analysis-only, and
+  merge flows need it to reach their command.
+- The local machine screens the projection with `plans.JsonPlan` and
+  `screen_plan(..., engine_version=...)` — **zero pyspark there**; the engine
+  version travels with the plan because that kernel is the grammar pin. The
+  proto/JSON equivalence is a differential property tested on every pinned wheel
+  (it caught a real defect: 4.x `Relation` carries `common` outside the oneof).
+- Deliberately not enforcing: nothing stops the execute tool from running the code
+  anyway. The static scan remains the boundary; this closes the dynamic gap where
+  the Python is already resolved (DataFrame writes the folder cannot fold).
+
+The enforcing follow-up — **request custody** — is the idea worth keeping: the
+capture stub does not discard the request, it *holds* it in the kernel, and the
+execute tool becomes "replay the held request". Then execution can only ever send
+something that was captured, and what the screener judged is byte-identical to what
+runs. Costs: kernel-side request lifetime, multi-request flows (`AnalyzePlan` then
+`ExecutePlan` for merges), and the same guardrail-not-boundary caveat. Would change
+our mind: if the harness can guarantee the same text is screened and executed by
+construction (the execute tool screening cell text itself), custody adds little
+beyond the in-process gate T8 already ships — it is the gate split across a network
+boundary, valuable when the screening must happen off-box.
