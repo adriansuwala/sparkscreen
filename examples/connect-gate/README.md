@@ -139,3 +139,11 @@ What the capture guarantees, all differential-tested per wheel:
 This is the advisory half of the design — the enforcing variant ("hold the request,
 replay it only after the verdict allows") is T9 in `docs/threads.md`, deliberately
 not built yet.
+
+The full arc has an integration test that runs the real wire per pinned wheel:
+a `jupyter_server` subprocess with a pyspark kernel, the harness side creating the
+session over REST and executing the bootstrap/capture cells, and a second
+interpreter **without pyspark** screening what came back
+(`tests/differential/test_capture_two_tool.py`). What it does not simulate is
+JupyterHub's auth/session layer on top of the same API, or a live cluster — the
+kernel never needs one for the capture itself.
