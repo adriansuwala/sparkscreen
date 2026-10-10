@@ -289,3 +289,212 @@ real agent output that operators stopped reading UNKNOWN — at which point the 
 real sandbox might be worth paying. We have not measured that, and measuring it means
 collecting a corpus of real snippets. That corpus does not exist yet and is probably the
 highest-value next artifact of any kind.
+
+## T8 — EXPLAIN-plan parsing as a second oracle (refinement of T2)
+
+**Status: musing, probed against live engines 2026-10-06.** Raised while considering T2:
+instead of intercepting Spark Connect's typed logical plan on the wire, run `EXPLAIN <stmt>`
+and parse the plan text. Probed on all three pinned engines (pyspark 3.5.1, 4.1.3, 4.2.0,
+local mode). No implementation exists; this section records what was measured.
+
+**What EXPLAIN buys, verified.**
+
+1. **It executes nothing.** Ran `EXPLAIN` before `drop table`, `insert overwrite/into`,
+   `merge`, `truncate`, `alter table rename`, `cache/uncache`, `set`, `add jar`,
+   `create function`, `reset`, and CTAS: catalog state, row counts, cache state and the
+   function list were unchanged afterwards on all three engines. This is the property that
+   makes it a *screener* input rather than an execution. Also verified: `EXPLAIN
+   DROP TABLE SCRATCH_T` in uppercase left the table in place — a differential-style test
+   can assert non-execution directly, not just absence of an error.
+2. **The plan text carries the facts a policy needs.** `DropTable ... default.scratch_t,
+   false, false, ...` — target, and both boolean flags (`IF EXISTS`, `IF EXISTS`-view).
+   `Execute InsertIntoHadoopFsRelationCommand <path>, false, Parquet, [path=...], Overwrite,
+   \`spark_catalog\`.\`default\`.\`scratch_t\`, ..., [id]` — target, write mode, and columns.
+   Also legible: `TruncateTable`, `AlterTableRenameCommand`, `CacheTable`,
+   `SetCommand`, `AddJarsCommand`, `CreateFunctionCommand`, `ResetCommand`, `RefreshTable`.
+   The plan resolves what the static folder cannot: the schema-qualified, engine-canonical
+   target of the statement that would actually run.
+3. **It covers DataFrame writes.** `df.write.mode("overwrite").save("s3://bucket/x")`
+   EXPLAINs to the same `Execute InsertIntoHadoopFsRelationCommand ... Save` text — the
+   DataFrame blind spot T2 targets, without Spark Connect.
+4. **It reveals the engine's post-analysis state, not the text's.** `EXPLAIN select * from
+   no_such_table_zz` embeds `AnalysisException: [TABLE_OR_VIEW_NOT_FOUND]` in the plan on
+   3.5.1 — you learn whether a statement is even analysable without running it.
+
+**What it costs, also verified.**
+
+- **4.1.3 and 4.2.0 return an empty error on planning failure.** `EXPLAIN merge into ...`
+  (V1 parquet catalog) gives `Error occurred during query planning: ` with *no message* on
+  4.x, while 3.5.1 embeds the full AnalysisException. Parseability of the wrapper is
+  engine-specific, so a parser cannot lean on the error text. (Merging into a V1 table
+  fails for real too, so this is an accuracy note, not a safety hole.)
+- **Identifier casing is not canonicalised uniformly.** `EXPLAIN DROP TABLE SCRATCH_T`
+  reports `default.SCRATCH_T` verbatim, while INSERT nodes show the quoted canonical
+  `` `spark_catalog`.`default`.`scratch_t` ``. Case-insensitivity (F6) must be normalised
+  by the plan parser, not inherited from the engine.
+- **Plan text is not a contract.** Node names and shapes (`DropTable` args, the
+  `DataSourceV2Strategy$$Lambda$...` suffix, `InsertIntoHadoopFsRelationCommand` fields)
+  are `ExplainUtils`/TreeNode rendering, not a stable interface; they already differ
+  between 3.5.1 and 4.x in the wrapper only, but upstream treats them as free to change.
+  Any matcher on plan text needs per-engine pinning, exactly like the grammars, and a
+  differential test that fails loudly when a plan shape moves.
+- **It answers a different question than static screening.** EXPLAIN needs a running
+  engine, so it is unavailable offline / pre-commit, and it screens what *would* run here,
+  not the file being reviewed.
+
+**Where it sits relative to T2/T5.** T2's real content is a second, more accurate oracle
+next to the static path, with the DataFrame gap as the headline. EXPLAIN is the cheapest
+concrete form of that oracle: no proxy, no Connect dependency, works in local mode, and
+its natural home is the differential suite (same shape as the live-Spark harness that
+caught F6) plus an optional runtime gate alongside a future Connect shim. The wire-level
+plan from T2 would still supersede it on fidelity — typed nodes instead of rendered text —
+so T8 is the version to build when the question is "is the plan-based oracle worth
+building at all", and the answer feeds T5's "both" leaning.
+
+**Would change our mind** if plan-text shapes prove unstable across engine *patch*
+releases — then only the wire-level (T2) form survives, and EXPLAIN downgrades to a test
+fixture.
+
+### T8 addendum — the grammar for plans exists, and it ships in the wheel (2026-10-06)
+
+Probing T8 surfaced the answer to its implicit question — *what would the plan oracle
+parse?* There is no grammar for EXPLAIN text; the plan that *has* a grammar is the
+Spark Connect protobuf, and every pinned pyspark wheel ships it:
+
+- `pyspark/sql/connect/proto/*.pyi` + `*_pb2.py` (needs `grpcio` only for the transport,
+  not the messages): `Relation` carries a **closed oneof of 51 kinds** on 3.5.1, 59 on
+  4.1.3; `Command` carries **11 kinds on 3.5.1, 20 on 4.1.3**. Enumerated live from
+  `DESCRIPTOR.oneofs`, not from a corpus — the same "derived universe" discipline the
+  label mapping uses.
+- The policy-relevant fields are **typed enums**, not rendered text:
+  `WriteOperation.SaveMode` (APPEND/OVERWRITE/ERROR_IF_EXISTS/IGNORE) and
+  `WriteOperationV2.Mode` (CREATE/OVERWRITE/OVERWRITE_PARTITIONS/APPEND/REPLACE/
+  CREATE_OR_REPLACE, plus `overwrite_condition` as an Expression).
+- A hand-built walk resolved kind/target/mode to effect flags mechanically, including
+  the `SAVE_MODE_UNSPECIFIED` case, which is *structurally* visible and fails closed —
+  the plan-level twin of T5b's aliased-writer-judgment. An unset oneof reports `None`,
+  never a guess.
+
+**The T4-shaped integration is real and smaller than the SQL one.** `sql_command` carries
+the raw SQL string, so the ANTLR pipeline and `LABEL_EFFECTS` stay the SQL source of
+truth and the proto screen *delegates* to them — the plan table only covers what plans
+actually carry natively: writes, merges, function/DataSource registration (LOAD_CODE),
+streaming/checkpoint commands. That is roughly a dozen entries, each mapping to the
+existing `Effect` flags, keyed on kind (+mode). D4's coarse-orthogonal requirement holds:
+nothing in the proto needs a new flag.
+
+Two honest mismatches with the T4 framing:
+
+- T4 imagined *third-party* catalogues; this is Spark's own catalogue. Still worth doing
+  — it exercises the Effect contract on a second backend, which is the forcing function
+  T6 wanted.
+- Version churn is real but cheap to pin: kind sets grew 51→59 and 11→20 between
+  3.5.1 and 4.1.3, and `SqlCommand` field names changed under them. The wheel version
+  is the pin, the same matrix as the grammars, and additive new kinds fail closed into
+  UNKNOWN rather than mis-mapping.
+
+This upgrades T2's feasibility note from "would see every plan" to a concrete, verified
+shape: a wrapper over the client's plan builder (or a wire proxy) walking
+`Plan.command`/`Plan.root`, mapping the closed kind universe to `Effect`, delegating
+`sql_command` to the existing pipeline. The EXPLAIN path (above) then downgrades from
+"backend input" to *differential oracle for the delegation* — it is how you prove the
+ANTLR path saw what the engine saw.
+
+**Deployment shape, verified in-process (2026-10-06).** The wire proxy is only one of
+the deployments, and the most expensive one. The interception point is the client
+object in the same process, before any network byte: with a spy in place of the gRPC
+stub (`client._stub` on pyspark 4.1.3), `spark.range(1).write.mode("overwrite")
+.saveAsTable("prod.users")` built the real `ExecutePlanRequest` and never left the
+process; `plan.command` walked to `(write_operation, prod.users, SAVE_MODE_OVERWRITE)`
+and `{WRITE_DATA, DESTROY_DATA}` with no server listening at all. A client wrapper
+(subclass or stub swap) is therefore a *gate*, not a tap: raising inside the stub
+blocks the write, the same enforcement shape as the MCP server in T3, minus the
+dependency. Session-level RPCs (`Config`) pass through; only `ExecutePlan` carries a
+plan. Cheap → expensive, the tiers are:
+
+1. **Static file scan** — what ships today; no engine at all.
+2. **In-process client wrapper** — zero infrastructure; screens and gates any code that
+   runs against Connect through that client. Bypass surface: a session constructed
+   without the wrapper, as with any hook.
+3. **EXPLAIN-before-execute on a session you already control** — the T8 text path as a
+   runtime gate, and the only plan-level option for *classic* sessions (their plans are
+   JVM-internal; Python never sees a typed plan to walk). Costs a JVM and one extra RPC
+   per statement; parses plan text pinned to that engine, not an arbitrary engine.
+4. **Wire proxy in front of a shared Connect server** — the MITM. Needed only when
+   clients are not under our control (shared cluster, org boundary); strictly the most
+   moving parts of the four.
+
+T8 proper (parsing EXPLAIN text) is not the local-scan screening surface — a local scan
+of a file needs no engine, and an engine-backed scan is a different weight class than
+the 12 ms no-JVM hook. Its verified value is (a) differential oracle in tests, and
+(b) tier 3 for sessions that exist at run time.
+
+**Remote-kernel topology (JupyterHub + MCP over REST, 2026-10-06).** When the agent's
+code runs in a Jupyter kernel on a remote server, the plan exists only in that kernel
+process; the local machine never sees one, so the wrapper belongs there, not locally.
+Two things this topology seems to require but does not:
+
+- **No injected request.** Interception sees the request the kernel was *already*
+  sending — the plan is an argument to `ExecutePlan`, not a response to be fetched
+  (the spy experiment produced zero extra RPCs on the path).
+- **No serialization round-trip to a central sparkscreen.** The policy engine is pure
+  Python with no runtime JVM, so it installs in the kernel environment and answers
+  in-process; a `DENY` raises before the stub call, and the verdict travels back the
+  way cell output already does. Serializing the proto to a remote policy service is
+  possible (it is a wire format) but buys nothing unless policy must be centralized.
+
+What actually gets harder in this topology:
+
+- **Connect vs classic decides which tier exists.** A kernel whose `SparkSession` is
+  classic (spark:// master, cluster-side session — the common JHub setup) has no
+  client-side proto at all; the plan-level option there is the EXPLAIN gate (tier 3),
+  and the JVM is conveniently local to the kernel. A Connect kernel gets the wrapper.
+- **Installation is a managed-image problem:** a kernelspec or IPython startup hook
+  that wraps `SparkSession.Builder.getOrCreate`. Like any in-process gate, agent code
+  that constructs its own session bypasses it — a guardrail, not a boundary.
+- **The kernel's pyspark version is the pin** for the proto kind table, the same
+  per-environment matrix the grammars use.
+
+Meanwhile the static tier is unaffected and stays primary: the cell text crosses the
+REST API, so the MCP server — or the harness hook — screens it locally with today's
+sparkscreen before it is ever sent. The kernel tier exists to close the dynamic gap
+(f-string SQL the folder could not fold, DataFrame writes), not to replace the scan.
+
+## T9 — the two-tool design: capture the plan, custody the request (2026-10-06)
+
+The topology this thread reasons about has *two* remotes: the local harness machine,
+a Jupyter kernel (pyspark, Connect client) as the execution point, and the Spark
+cluster behind it. Connect only ever carries typed plans *upstream* (client → server)
+— the server never returns one, and `EXPLAIN` returns render text, not a grammar —
+so "send code to the remote, get a typed plan back" is impossible as stated. But the
+plan is a *local artifact of the kernel*: the client assembles it before any send
+(proven in T8), so a kernel-side capture stub can hand it over without a server, and
+the screening can happen wherever the policy lives.
+
+Built (the advisory half), in `connect.capture_plans`:
+
+- The capture stub takes the assembled `ExecutePlan` apart before the wire and
+  ships the plan as a `json_format` projection plus the kernel's pyspark version.
+  Plan *building* needs no server either: 4.x prefetches two compression keys via
+  `Config` before its first plan, and the stub answers that locally (empty response
+  reads as compression disabled). `AnalyzePlan` passes through — analysis-only, and
+  merge flows need it to reach their command.
+- The local machine screens the projection with `plans.JsonPlan` and
+  `screen_plan(..., engine_version=...)` — **zero pyspark there**; the engine
+  version travels with the plan because that kernel is the grammar pin. The
+  proto/JSON equivalence is a differential property tested on every pinned wheel
+  (it caught a real defect: 4.x `Relation` carries `common` outside the oneof).
+- Deliberately not enforcing: nothing stops the execute tool from running the code
+  anyway. The static scan remains the boundary; this closes the dynamic gap where
+  the Python is already resolved (DataFrame writes the folder cannot fold).
+
+The enforcing follow-up — **request custody** — is the idea worth keeping: the
+capture stub does not discard the request, it *holds* it in the kernel, and the
+execute tool becomes "replay the held request". Then execution can only ever send
+something that was captured, and what the screener judged is byte-identical to what
+runs. Costs: kernel-side request lifetime, multi-request flows (`AnalyzePlan` then
+`ExecutePlan` for merges), and the same guardrail-not-boundary caveat. Would change
+our mind: if the harness can guarantee the same text is screened and executed by
+construction (the execute tool screening cell text itself), custody adds little
+beyond the in-process gate T8 already ships — it is the gate split across a network
+boundary, valuable when the screening must happen off-box.

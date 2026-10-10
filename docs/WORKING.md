@@ -10,7 +10,7 @@ For user documentation, see [user-docs](user-docs/) and the [README](../README.m
 |---|---|---|
 | [findings](findings.md) | every bug found, with a live reproducer, ordered by severity | deciding whether to trust the tool; touching the area a bug lived in |
 | [decisions](decisions.md) | D1–D14, numbered, with what the rejected alternative cost | about to change something a decision already settled |
-| [threads](threads.md) | T1–T6, open questions and feasibility notes | looking for work that is *not* decided yet |
+| [threads](threads.md) | T1–T9, open questions and feasibility notes | looking for work that is *not* decided yet |
 | [roadmap](roadmap.md) | current state and what is next | picking something up |
 | [agents.md](agents.md) | how to work in this repo: conventions, traps, verification habits | before delegating to a subagent |
 | [issues.md](issues.md) | the issue ledger and how it relates to the roadmap | before creating or closing work |

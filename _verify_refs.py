@@ -85,7 +85,7 @@ ENGINE_PIN_RE = re.compile(r"pyspark==(\d+\.\d+\.\d+)")
 #: run. The prose in usage.md that explains the removal passes; the example above it does not.
 RETIREMENT_NARRATION = re.compile(
     r"(earlier|formerly|previous|used to|no longer|\bgone\b|removed|not supported"
-    r"|retired|superseded)", re.I)
+    r"|retired|superseded|\bdrop(ped)?\b)", re.I)
 EXECUTABLE_SHAPE = re.compile(r"^\s*(#|//)?\s*(\w+\s*=|\w+\(|\$|>|python|bash|sh )")
 
 #: Tests legitimately name grammars that do not exist, to prove they are rejected. Only

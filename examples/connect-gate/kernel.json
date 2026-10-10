@@ -1,0 +1,20 @@
+{
+  "display_name": "Python 3 (sparkscreen gate)",
+  "language": "python",
+  "argv": [
+    "python3",
+    "-m",
+    "ipykernel_launcher",
+    "-f",
+    "{connection_file}"
+  ],
+  "env": {
+    "SPARKSCREEN_LIB": "/home/jovyan/sparkscreen-lib",
+    "PYTHONSTARTUP": ""
+  },
+  "metadata": {
+    "sparkscreen": {
+      "note": "User-level kernelspec that shadows the image's python3 kernel. The env var points at an unpacked sparkscreen wheel in the persistent home; the IPython startup hook (00-sparkscreen-gate.py in ~/.ipython/profile_default/startup/) does the rest. Adjust SPARKSCREEN_LIB to your home layout; adjust argv if the image's interpreter is not python3 on PATH."
+    }
+  }
+}
